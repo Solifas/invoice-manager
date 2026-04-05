@@ -10,3 +10,4 @@ backend/staticfiles/
 
 node_modules/
 frontend/.next/
+run-logs/

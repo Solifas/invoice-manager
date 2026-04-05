@@ -1,0 +1,8 @@
+Hello {{ client.name }},
+
+Invoice {{ invoice.invoice_number }} is due on {{ invoice.due_date }}.
+
+Outstanding amount: {{ invoice.currency }} {{ invoice.total_amount }}
+Invoice link: {{ frontend_url }}/invoices/{{ invoice.id }}
+
+Thank you.

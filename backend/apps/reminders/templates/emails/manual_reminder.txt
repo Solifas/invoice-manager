@@ -1,0 +1,8 @@
+Hello {{ client.name }},
+
+This is a reminder that invoice {{ invoice.invoice_number }} for {{ invoice.currency }} {{ invoice.total_amount }} is still outstanding.
+
+Due date: {{ invoice.due_date }}
+Invoice link: {{ frontend_url }}/invoices/{{ invoice.id }}
+
+Thank you.

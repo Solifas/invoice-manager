@@ -1,0 +1,9 @@
+Hello {{ client.name }},
+
+Invoice {{ invoice.invoice_number }} is overdue.
+
+Due date: {{ invoice.due_date }}
+Outstanding amount: {{ invoice.currency }} {{ invoice.total_amount }}
+Invoice link: {{ frontend_url }}/invoices/{{ invoice.id }}
+
+Please arrange payment at your earliest convenience.

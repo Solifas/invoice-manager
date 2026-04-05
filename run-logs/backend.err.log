@@ -1,0 +1,4 @@
+Watching for file changes with StatReloader
+C:\Users\Super-Solie\AppData\Local\Programs\Python\Python313\Lib\site-packages\requests\__init__.py:113: RequestsDependencyWarning: urllib3 (2.5.0) or chardet (7.4.0.post2)/charset_normalizer (3.4.6) doesn't match a supported version!
+  warnings.warn(
+[05/Apr/2026 08:20:33] "GET /api/invoices/1/pdf/ HTTP/1.1" 200 2609

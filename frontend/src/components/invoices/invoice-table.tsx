@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { Invoice } from "@/lib/types";
+import { InvoiceSummary } from "@/lib/types";
 import { StatusBadge } from "@/components/invoices/status-badge";
 
 export function InvoiceTable({
@@ -8,7 +8,7 @@ export function InvoiceTable({
   isLoading,
   isError,
 }: {
-  invoices: Invoice[];
+  invoices: InvoiceSummary[];
   isLoading: boolean;
   isError: boolean;
 }) {

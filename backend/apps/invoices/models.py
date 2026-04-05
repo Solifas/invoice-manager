@@ -1,9 +1,14 @@
+import secrets
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import models
 
 from apps.clients.models import Client
+
+
+def generate_invoice_public_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
 class InvoiceStatus(models.TextChoices):
@@ -19,8 +24,27 @@ class TaxType(models.TextChoices):
     PERCENTAGE = "percentage", "Percentage"
 
 
+class RecurringInvoiceFrequency(models.TextChoices):
+    WEEKLY = "weekly", "Weekly"
+    MONTHLY = "monthly", "Monthly"
+    QUARTERLY = "quarterly", "Quarterly"
+
+
+class RecurringInvoiceStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    PAUSED = "paused", "Paused"
+    CANCELLED = "cancelled", "Cancelled"
+
+
 class Invoice(models.Model):
     client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name="invoices")
+    recurring_invoice = models.ForeignKey(
+        "RecurringInvoice",
+        on_delete=models.SET_NULL,
+        related_name="generated_invoices",
+        blank=True,
+        null=True,
+    )
     invoice_number = models.CharField(max_length=50, unique=True)
     issue_date = models.DateField()
     due_date = models.DateField()
@@ -32,6 +56,14 @@ class Invoice(models.Model):
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payment_page_enabled = models.BooleanField(default=False)
+    public_token = models.CharField(max_length=64, unique=True, default=generate_invoice_public_token)
+    eft_account_holder_name = models.CharField(max_length=255, blank=True)
+    eft_bank_name = models.CharField(max_length=255, blank=True)
+    eft_account_number = models.CharField(max_length=64, blank=True)
+    eft_account_type = models.CharField(max_length=50, blank=True)
+    eft_branch_code = models.CharField(max_length=32, blank=True)
+    payment_reference = models.CharField(max_length=100, blank=True)
     reminder_last_sent_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -46,6 +78,33 @@ class Invoice(models.Model):
             raise ValidationError({"tax_rate": "Tax rate must be zero when tax is disabled."})
         if self.tax_rate < 0:
             raise ValidationError({"tax_rate": "Tax rate cannot be negative."})
+        if self.payment_page_enabled:
+            missing_fields = {
+                "eft_account_holder_name": self.eft_account_holder_name,
+                "eft_bank_name": self.eft_bank_name,
+                "eft_account_number": self.eft_account_number,
+            }
+            invalid_fields = [field for field, value in missing_fields.items() if not value]
+            if invalid_fields:
+                raise ValidationError(
+                    {field: "This field is required when the payment page is enabled." for field in invalid_fields}
+                )
+
+    @property
+    def resolved_payment_reference(self) -> str:
+        return self.payment_reference or self.invoice_number
+
+    @property
+    def amount_paid(self):
+        from .services import get_invoice_amount_paid
+
+        return get_invoice_amount_paid(self)
+
+    @property
+    def outstanding_amount(self):
+        from .services import get_invoice_outstanding_amount
+
+        return get_invoice_outstanding_amount(self)
 
     def __str__(self) -> str:
         return self.invoice_number
@@ -64,8 +123,85 @@ class InvoiceLineItem(models.Model):
     def clean(self) -> None:
         if self.quantity < 0:
             raise ValidationError({"quantity": "Quantity cannot be negative."})
+        if self.quantity != self.quantity.to_integral_value():
+            raise ValidationError({"quantity": "Quantity must be a whole number."})
         if self.unit_price < 0:
             raise ValidationError({"unit_price": "Unit price cannot be negative."})
 
     def __str__(self) -> str:
         return self.description
+
+
+class InvoicePayment(models.Model):
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name="payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_date = models.DateField()
+    payment_method = models.CharField(max_length=50, blank=True)
+    reference = models.CharField(max_length=100, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-payment_date", "-created_at")
+
+    def clean(self) -> None:
+        if self.amount <= Decimal("0.00"):
+            raise ValidationError({"amount": "Payment amount must be greater than zero."})
+
+        invoice_total = self.invoice.total_amount or Decimal("0.00")
+        existing_total = (
+            self.invoice.payments.exclude(pk=self.pk).aggregate(total=models.Sum("amount")).get("total") or Decimal("0.00")
+        )
+        if existing_total + self.amount > invoice_total:
+            raise ValidationError({"amount": "Total payments cannot exceed the invoice total."})
+
+    def __str__(self) -> str:
+        return f"{self.invoice.invoice_number} payment {self.amount}"
+
+
+class RecurringInvoice(models.Model):
+    client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name="recurring_invoices")
+    contractor = models.ForeignKey(
+        "contractors.Contractor",
+        on_delete=models.SET_NULL,
+        related_name="recurring_invoices",
+        blank=True,
+        null=True,
+    )
+    template_name = models.CharField(max_length=255)
+    frequency = models.CharField(max_length=20, choices=RecurringInvoiceFrequency.choices)
+    start_date = models.DateField()
+    end_date = models.DateField(blank=True, null=True)
+    next_run_date = models.DateField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=RecurringInvoiceStatus.choices, default=RecurringInvoiceStatus.ACTIVE)
+    currency = models.CharField(max_length=8, default="USD")
+    payment_terms_days = models.PositiveIntegerField(default=14)
+    tax_type = models.CharField(max_length=20, choices=TaxType.choices, default=TaxType.NONE)
+    tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    notes = models.TextField(blank=True)
+    line_items_template = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("template_name", "id")
+
+    def clean(self) -> None:
+        if self.end_date and self.end_date < self.start_date:
+            raise ValidationError({"end_date": "End date cannot be before start date."})
+        if self.next_run_date and self.next_run_date < self.start_date:
+            raise ValidationError({"next_run_date": "Next run date cannot be before the start date."})
+        if self.tax_type == TaxType.NONE and self.tax_rate != Decimal("0.00"):
+            raise ValidationError({"tax_rate": "Tax rate must be zero when tax is disabled."})
+        if self.tax_rate < 0:
+            raise ValidationError({"tax_rate": "Tax rate cannot be negative."})
+        if self.payment_terms_days < 0:
+            raise ValidationError({"payment_terms_days": "Payment terms cannot be negative."})
+        for index, item in enumerate(self.line_items_template):
+            quantity = Decimal(str(item.get("quantity", "0")))
+            if quantity != quantity.to_integral_value():
+                raise ValidationError({"line_items_template": f"Line item {index + 1} quantity must be a whole number."})
+
+    def __str__(self) -> str:
+        return self.template_name

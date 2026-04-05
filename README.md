@@ -7,7 +7,30 @@ Full-stack invoice management MVP for small businesses and freelancers.
 - Backend: Django, Django REST Framework, PostgreSQL, Celery, Redis
 - Frontend: Next.js App Router, TypeScript, React Query
 - Config: environment-variable based
-- Background jobs: scheduled and manual reminder emails
+- Background jobs: scheduled reminders and recurring invoice generation
+- Authentication: Django session auth with CSRF-protected REST endpoints
+
+## Phase 2 additions
+
+- Public EFT payment pages at `/pay/{token}`
+- Partial payments with invoice payment history
+- Email and WhatsApp reminder channels
+- Recurring invoice templates with scheduled generation
+
+## Authentication architecture
+
+- Backend auth uses Django's built-in user model with email-based sign-in.
+- The app uses server-side Django sessions instead of JWTs.
+- Internal API routes require an authenticated session by default.
+- The frontend sends credentials with every internal API request and includes the CSRF token for unsafe requests.
+- Password reset uses Django's secure, time-limited token generator and sends reset links to the frontend route at `/reset-password`.
+- The public EFT payment flow at `/pay/{token}` and `/api/public/pay/{token}/` remains accessible without login.
+
+This approach fits the existing browser-based architecture cleanly:
+
+- no token storage in localStorage
+- backend keeps authentication state and password security logic
+- frontend only needs session bootstrap plus route gating
 
 ## Folder structure
 
@@ -16,8 +39,9 @@ invoice-manager/
   backend/
     apps/
       clients/      Client model
+      contractors/  Optional contractor records used by recurring templates
       invoices/     Invoice domain, API, services, seed command, tests
-      reminders/    Email reminder services and Celery tasks
+      reminders/    Reminder channel services and Celery tasks
     config/         Django settings, URLs, Celery bootstrap
   frontend/
     src/app/        Dashboard and invoice pages
@@ -35,9 +59,16 @@ invoice-manager/
 ```bash
 cd backend
 python -m venv .venv
+# Windows
 .venv\Scripts\activate
+
+# macOS / Linux
+source .venv/bin/activate
+
 pip install -r requirements.txt
 ```
+
+The backend loads `backend/.env` automatically at startup. Values already present in the shell environment still take precedence.
 
 4. Run migrations and seed data:
 
@@ -59,6 +90,23 @@ celery -A config worker -l info
 celery -A config beat -l info
 ```
 
+## Backend auth routes
+
+- `GET /api/auth/csrf/`
+- `POST /api/auth/register/`
+- `POST /api/auth/login/`
+- `POST /api/auth/logout/`
+- `POST /api/auth/forgot-password/`
+- `POST /api/auth/reset-password/`
+- `GET /api/auth/me/`
+
+All `/api/auth/*` routes are public except:
+
+- `POST /api/auth/logout/`
+- `GET /api/auth/me/`
+
+All internal invoice, recurring, client, contractor, payment, and dashboard routes require authentication by default.
+
 ## Frontend setup
 
 1. Copy `frontend/.env.example` to `frontend/.env`.
@@ -71,6 +119,38 @@ npm run dev
 ```
 
 3. Open [http://localhost:3000](http://localhost:3000).
+
+The frontend reads `frontend/.env`, and the invoice form will follow the browser's locale for decimal formatting. For example, some users will see `1,00` instead of `1.00`. In the line-item editor:
+
+- `Quantity` is the number of units being billed.
+- `Unit price` is the price for one unit.
+- `Line total` is calculated in the UI as `quantity x unit price`.
+
+## Auth flow in the frontend
+
+Pages added:
+
+- `/login`
+- `/register`
+- `/forgot-password`
+- `/reset-password`
+
+Protected routes:
+
+- `/`
+- `/dashboard`
+- `/invoices/*`
+- `/recurring-invoices/*`
+
+Public routes:
+
+- `/login`
+- `/register`
+- `/forgot-password`
+- `/reset-password`
+- `/pay/{token}`
+
+Unauthenticated users are redirected to `/login`, and protected page content is held behind an auth bootstrap loading state so internal content does not flash before redirect.
 
 ## Docker setup
 
@@ -96,8 +176,60 @@ docker compose up --build
 - `DELETE /api/invoices/{id}/`
 - `GET /api/invoices/dashboard-summary/`
 - `POST /api/invoices/{id}/send-reminder/`
+- `POST /api/invoices/{id}/remind/`
+- `GET /api/invoices/{id}/payments/`
+- `POST /api/invoices/{id}/payments/`
+- `PATCH /api/payments/{id}/`
+- `POST /api/invoices/{id}/payment-page/regenerate-token/`
 - `GET /api/invoices/{id}/pdf/`
+- `GET /api/public/pay/{token}/`
+- `GET /api/recurring-invoices/`
+- `POST /api/recurring-invoices/`
+- `PATCH /api/recurring-invoices/{id}/`
+- `DELETE /api/recurring-invoices/{id}/`
 - `GET /api/line-items/?invoice={invoice_id}`
+
+## Example auth payloads
+
+Register:
+
+```json
+{
+  "email": "owner@example.com",
+  "password": "StrongPass123!",
+  "confirm_password": "StrongPass123!",
+  "first_name": "Ava",
+  "last_name": "Owner"
+}
+```
+
+Login:
+
+```json
+{
+  "email": "owner@example.com",
+  "password": "StrongPass123!"
+}
+```
+
+Forgot password:
+
+```json
+{
+  "email": "owner@example.com"
+}
+```
+
+Reset password:
+
+```json
+{
+  "uid": "Mg",
+  "token": "czt6ir-7ddc0f5f3d9f6a2f0b4f2f7b2f3d4e90",
+  "password": "EvenStronger123!",
+  "confirm_password": "EvenStronger123!"
+}
+```
 
 ## Example invoice payload
 
@@ -111,10 +243,18 @@ docker compose up --build
   "currency": "USD",
   "tax_type": "percentage",
   "tax_rate": "15.00",
+  "payment_page_enabled": true,
+  "eft_account_holder_name": "Invoice Manager Pty Ltd",
+  "eft_bank_name": "Example Bank",
+  "eft_account_number": "1234567890",
+  "eft_account_type": "Business",
+  "eft_branch_code": "250655",
+  "payment_reference": "",
   "client": {
     "name": "Atlas Creative",
     "email": "billing@atlas.test",
-    "address": "54 Main Road"
+    "address": "54 Main Road",
+    "phone_number": "+27123456789"
   },
   "line_items": [
     {
@@ -126,6 +266,51 @@ docker compose up --build
       "description": "SEO support",
       "quantity": "2.00",
       "unit_price": "250.00"
+    }
+  ]
+}
+```
+
+## Example record-payment payload
+
+```json
+{
+  "amount": "500.00",
+  "payment_date": "2026-04-05",
+  "payment_method": "eft",
+  "reference": "ATLAS-DEP-001",
+  "notes": "First partial payment received."
+}
+```
+
+## Example reminder payload
+
+```json
+{
+  "channel": "whatsapp"
+}
+```
+
+## Example recurring-invoice payload
+
+```json
+{
+  "template_name": "Monthly Retainer",
+  "client_id": 1,
+  "contractor_id": 1,
+  "frequency": "monthly",
+  "start_date": "2026-04-05",
+  "status": "active",
+  "currency": "USD",
+  "payment_terms_days": 14,
+  "tax_type": "percentage",
+  "tax_rate": "15.00",
+  "notes": "Generated automatically.",
+  "line_items_template": [
+    {
+      "description": "Retainer",
+      "quantity": "1.00",
+      "unit_price": "950.00"
     }
   ]
 }
@@ -144,10 +329,21 @@ docker compose up --build
 
 ## Validation and business rules
 
+- Email + password authentication is required for all internal app routes and internal API access.
+- Password reset emails always return a safe generic response, even for unknown email addresses.
+- Password reset links are time-limited using Django's secure token generator.
+- Session auth requires frontend requests to include credentials and CSRF headers for unsafe methods.
+
 - Due date cannot be before issue date.
-- Quantity and unit price cannot be negative.
+- Quantity must be a whole-number unit and unit price cannot be negative.
+- Payment amounts must be greater than zero.
+- Total recorded payments cannot exceed the invoice total.
+- Decimal values may render with a comma or period depending on the user's browser locale, but the numeric meaning is the same.
 - Line totals, subtotal, tax, and grand total are recalculated server-side.
-- Overdue invoices are derived from due dates when invoices are recalculated.
+- Paid, outstanding, and overdue states are derived server-side from due dates and recorded payments.
+- Public payment pages only expose invoice summary data plus EFT details and are hidden when disabled.
+- WhatsApp reminders fail fast when the client has no phone number or no provider is configured.
+- Recurring invoices generate draft invoices and advance `next_run_date` without duplicating the same cycle.
 
 ## Tests
 
@@ -161,8 +357,11 @@ python manage.py test
 The included tests cover:
 
 - invoice total recalculation
-- nested invoice creation via API
-- dashboard summary API flow
+- partial payment aggregation and status transitions
+- public EFT payment page access and invalid token handling
+- dashboard summary outstanding-balance flow
+- email and WhatsApp reminder dispatch behavior
+- recurring invoice generation and duplicate prevention
 - invoice PDF response generation
 
 ## PDF generation
@@ -171,6 +370,24 @@ The included tests cover:
 - Use `GET /api/invoices/{id}/pdf/` to download a rendered invoice PDF.
 - The invoice detail page exposes a `Download PDF` action.
 
+## Payment pages and reminders
+
+- Each invoice gets a secure `public_token` and an optional public payment page under `/pay/{token}`.
+- The internal invoice detail page exposes copy/open actions plus token regeneration for payment pages.
+- Public payment pages show invoice totals, amount already paid, outstanding balance, EFT banking details, and the payment reference.
+- `POST /api/invoices/{id}/remind/` accepts `email` or `whatsapp`.
+- WhatsApp delivery is provider-based. Local development can use `WHATSAPP_PROVIDER=console`, while production can use `WHATSAPP_PROVIDER=twilio`.
+
+## Seed data
+
+`python manage.py seed_invoice_data` now creates:
+
+- an EFT-enabled invoice with a public payment page
+- a partially paid overdue invoice
+- a fully paid invoice with recorded payment history
+- a contractor record used by a recurring invoice template
+- a recurring invoice template ready for scheduler testing
+
 ## Extensibility notes
 
-The backend is structured around domain apps plus service/selectors layers so later additions such as authentication, PDFs, recurring invoices, payment links, and multi-user support can be added without rewriting invoice logic.
+The backend is structured around domain apps plus service/selectors layers so later additions such as authentication, PDFs, richer reminder providers, recurring invoice automation, and multi-user support can be added without rewriting invoice logic.

@@ -4,12 +4,12 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { createInvoice, fetchInvoice, updateInvoice } from "@/lib/api";
+import { createInvoice, fetchInvoice, getErrorMessage, updateInvoice } from "@/lib/api";
 import { Invoice, InvoiceLineItem, InvoiceStatus, TaxType } from "@/lib/types";
 
 const emptyItem = (): InvoiceLineItem => ({
   description: "",
-  quantity: "1.00",
+  quantity: "1",
   unit_price: "0.00",
 });
 
@@ -24,7 +24,14 @@ function invoiceToPayload(invoice: Invoice) {
     currency: invoice.currency,
     tax_type: invoice.tax_type,
     tax_rate: invoice.tax_rate,
-    line_items: invoice.line_items.map((item) => ({
+    payment_page_enabled: invoice.payment_page_enabled ?? false,
+    eft_account_holder_name: invoice.eft_account_holder_name ?? "",
+    eft_bank_name: invoice.eft_bank_name ?? "",
+    eft_account_number: invoice.eft_account_number ?? "",
+    eft_account_type: invoice.eft_account_type ?? "",
+    eft_branch_code: invoice.eft_branch_code ?? "",
+    payment_reference: invoice.payment_reference ?? "",
+    line_items: (invoice.line_items ?? []).map((item) => ({
       description: item.description,
       quantity: item.quantity,
       unit_price: item.unit_price,
@@ -37,9 +44,9 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
   const [formState, setFormState] = useState<Invoice>({
     id: 0,
     invoice_number: "",
-    client: { name: "", email: "", address: "" },
-    issue_date: new Date().toISOString().slice(0, 10),
-    due_date: new Date().toISOString().slice(0, 10),
+    client: { name: "", email: "", address: "", phone_number: "" },
+    issue_date: "",
+    due_date: "",
     status: "draft",
     notes: "",
     currency: "USD",
@@ -48,7 +55,20 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
     subtotal: "0.00",
     tax_amount: "0.00",
     total_amount: "0.00",
+    amount_paid: "0.00",
+    outstanding_amount: "0.00",
+    payment_page_enabled: false,
+    public_token: "",
+    public_payment_url: "",
+    payment_link_available: false,
+    eft_account_holder_name: "",
+    eft_bank_name: "",
+    eft_account_number: "",
+    eft_account_type: "",
+    eft_branch_code: "",
+    payment_reference: "",
     line_items: [emptyItem()],
+    payments: [],
     created_at: "",
     updated_at: "",
   });
@@ -64,6 +84,23 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
       setFormState(invoiceQuery.data);
     }
   }, [invoiceQuery.data]);
+
+  useEffect(() => {
+    if (invoiceId) {
+      return;
+    }
+    setFormState((current) => {
+      if (current.issue_date && current.due_date) {
+        return current;
+      }
+      const today = new Date().toISOString().slice(0, 10);
+      return {
+        ...current,
+        issue_date: current.issue_date || today,
+        due_date: current.due_date || today,
+      };
+    });
+  }, [invoiceId]);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -231,6 +268,82 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
       <section className="card form-section">
         <div className="section-heading">
           <div>
+            <p className="eyebrow">Payment page</p>
+            <h3 className="section-title">Public EFT details</h3>
+            <p className="subtle-copy section-copy">
+              Enable a shareable public payment page for this invoice and control exactly what banking details are shown.
+            </p>
+          </div>
+        </div>
+        <div className="field-grid">
+          <label className="toggle-field field-span">
+            <span className="field-label">Enable public payment page</span>
+            <input
+              checked={formState.payment_page_enabled}
+              onChange={(event) => setFormState((current) => ({ ...current, payment_page_enabled: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label>
+            <span className="field-label">Account holder</span>
+            <input
+              className="input"
+              value={formState.eft_account_holder_name}
+              onChange={(event) =>
+                setFormState((current) => ({ ...current, eft_account_holder_name: event.target.value }))
+              }
+              required={formState.payment_page_enabled}
+            />
+          </label>
+          <label>
+            <span className="field-label">Bank name</span>
+            <input
+              className="input"
+              value={formState.eft_bank_name}
+              onChange={(event) => setFormState((current) => ({ ...current, eft_bank_name: event.target.value }))}
+              required={formState.payment_page_enabled}
+            />
+          </label>
+          <label>
+            <span className="field-label">Account number</span>
+            <input
+              className="input"
+              value={formState.eft_account_number}
+              onChange={(event) => setFormState((current) => ({ ...current, eft_account_number: event.target.value }))}
+              required={formState.payment_page_enabled}
+            />
+          </label>
+          <label>
+            <span className="field-label">Account type</span>
+            <input
+              className="input"
+              value={formState.eft_account_type}
+              onChange={(event) => setFormState((current) => ({ ...current, eft_account_type: event.target.value }))}
+            />
+          </label>
+          <label>
+            <span className="field-label">Branch code</span>
+            <input
+              className="input"
+              value={formState.eft_branch_code}
+              onChange={(event) => setFormState((current) => ({ ...current, eft_branch_code: event.target.value }))}
+            />
+          </label>
+          <label>
+            <span className="field-label">Payment reference</span>
+            <input
+              className="input"
+              placeholder="Defaults to invoice number"
+              value={formState.payment_reference}
+              onChange={(event) => setFormState((current) => ({ ...current, payment_reference: event.target.value }))}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="card form-section">
+        <div className="section-heading">
+          <div>
             <p className="eyebrow">Client</p>
             <h3 className="section-title">Billing contact</h3>
           </div>
@@ -259,6 +372,20 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
               required
             />
           </label>
+          <label>
+            <span className="field-label">Phone number</span>
+            <input
+              className="input"
+              value={formState.client.phone_number}
+              onChange={(event) =>
+                setFormState((current) => ({
+                  ...current,
+                  client: { ...current.client, phone_number: event.target.value },
+                }))
+              }
+              placeholder="+27123456789"
+            />
+          </label>
           <label className="field-span">
             <span className="field-label">Address</span>
             <textarea
@@ -278,64 +405,99 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
           <div>
             <p className="eyebrow">Line items</p>
             <h3 className="section-title">What you are billing for</h3>
+            <p className="subtle-copy section-copy">
+              Enter the quantity and the price for one unit. If your device uses comma decimals, `1,00` means `1.00`.
+            </p>
           </div>
           <button
             className="button button-ghost"
             type="button"
             onClick={() =>
-              setFormState((current) => ({ ...current, line_items: [...current.line_items, emptyItem()] }))
+                setFormState((current) => ({ ...current, line_items: [...current.line_items, emptyItem()] }))
             }
           >
             Add item
           </button>
         </div>
+        <div className="line-item-headings" aria-hidden="true">
+          <span>Description</span>
+          <span>Quantity</span>
+          <span>Unit price</span>
+          <span>Line total</span>
+          <span />
+        </div>
         <div className="line-item-list">
-          {formState.line_items.map((item, index) => (
-            <div className="line-item-row" key={`${index}-${item.description}`}>
-              <input
-                className="input line-description"
-                placeholder="Description"
-                value={item.description}
-                onChange={(event) => updateItem(index, { description: event.target.value })}
-                required
-              />
-              <input
-                className="input"
-                placeholder="Qty"
-                min="0"
-                step="0.01"
-                type="number"
-                value={item.quantity}
-                onChange={(event) => updateItem(index, { quantity: event.target.value })}
-                required
-              />
-              <input
-                className="input"
-                placeholder="Unit price"
-                min="0"
-                step="0.01"
-                type="number"
-                value={item.unit_price}
-                onChange={(event) => updateItem(index, { unit_price: event.target.value })}
-                required
-              />
-              <button
-                className="button button-danger"
-                type="button"
-                onClick={() =>
-                  setFormState((current) => {
-                    const nextItems = current.line_items.filter((_, itemIndex) => itemIndex !== index);
-                    return {
-                      ...current,
-                      line_items: nextItems.length ? nextItems : [emptyItem()],
-                    };
-                  })
-                }
-              >
-                Remove
-              </button>
-            </div>
-          ))}
+          {formState.line_items.map((item, index) => {
+            const quantity = Number(item.quantity) || 0;
+            const unitPrice = Number(item.unit_price) || 0;
+            const lineTotal = quantity * unitPrice;
+
+            return (
+              <div className="line-item-row" key={`${index}-${item.description}`}>
+                <label className="line-item-field line-item-description">
+                  <span className="field-label line-item-mobile-label">Description</span>
+                  <input
+                    className="input"
+                    placeholder="Brand refresh"
+                    value={item.description}
+                    onChange={(event) => updateItem(index, { description: event.target.value })}
+                    required
+                  />
+                </label>
+                <label className="line-item-field">
+                  <span className="field-label line-item-mobile-label">Quantity</span>
+                  <input
+                    className="input"
+                    placeholder="1"
+                    min="0"
+                    step="1"
+                    type="number"
+                    inputMode="numeric"
+                    value={item.quantity}
+                    onChange={(event) => updateItem(index, { quantity: event.target.value })}
+                    aria-label={`Quantity for line item ${index + 1}`}
+                    required
+                  />
+                </label>
+                <label className="line-item-field">
+                  <span className="field-label line-item-mobile-label">Unit price</span>
+                  <input
+                    className="input"
+                    placeholder="800.00"
+                    min="0"
+                    step="0.01"
+                    type="number"
+                    inputMode="decimal"
+                    value={item.unit_price}
+                    onChange={(event) => updateItem(index, { unit_price: event.target.value })}
+                    aria-label={`Unit price for line item ${index + 1}`}
+                    required
+                  />
+                </label>
+                <div className="line-total-card" aria-live="polite">
+                  <span className="field-label line-item-mobile-label">Line total</span>
+                  <strong>
+                    {formState.currency} {lineTotal.toFixed(2)}
+                  </strong>
+                </div>
+                <button
+                  className="button button-danger"
+                  type="button"
+                  onClick={() =>
+                    setFormState((current) => {
+                      const nextItems = current.line_items.filter((_, itemIndex) => itemIndex !== index);
+                      return {
+                        ...current,
+                        line_items: nextItems.length ? nextItems : [emptyItem()],
+                      };
+                    })
+                  }
+                >
+                  Remove
+                </button>
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -358,7 +520,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
         <button className="button button-large" disabled={mutation.isPending} type="submit">
           {mutation.isPending ? "Saving..." : invoiceId ? "Update invoice" : "Create invoice"}
         </button>
-        {mutation.isError ? <span className="form-error">Save failed. Check validation and try again.</span> : null}
+        {mutation.isError ? <span className="form-error">{getErrorMessage(mutation.error)}</span> : null}
       </div>
     </form>
   );

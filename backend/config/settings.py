@@ -7,6 +7,30 @@ from celery.schedules import crontab
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def load_env_file(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip().lstrip("\ufeff")
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+# Load backend/.env directly so local development works the same on macOS, Linux, and Windows.
+load_env_file(BASE_DIR / ".env")
+
+
 def env(name: str, default: str | None = None) -> str | None:
     return os.getenv(name, default)
 
@@ -25,7 +49,9 @@ INSTALLED_APPS = [
     "rest_framework",
     "django_filters",
     "corsheaders",
+    "apps.accounts",
     "apps.clients",
+    "apps.contractors",
     "apps.invoices",
     "apps.reminders",
 ]
@@ -70,7 +96,17 @@ DATABASES = {
     )
 }
 
-AUTH_PASSWORD_VALIDATORS = []
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
+AUTHENTICATION_BACKENDS = [
+    "apps.accounts.backends.EmailBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
@@ -83,6 +119,12 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
@@ -100,7 +142,11 @@ CELERY_BEAT_SCHEDULE = {
     "send-automated-invoice-reminders": {
         "task": "apps.reminders.tasks.send_automatic_invoice_reminders",
         "schedule": crontab(hour=8, minute=0),
-    }
+    },
+    "generate-recurring-invoices": {
+        "task": "apps.reminders.tasks.generate_recurring_invoices",
+        "schedule": crontab(hour=1, minute=0),
+    },
 }
 
 EMAIL_BACKEND = env("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
@@ -113,6 +159,17 @@ EMAIL_USE_SSL = env("EMAIL_USE_SSL", "False").lower() == "true"
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", "Billing <billing@example.com>")
 
 FRONTEND_URL = env("FRONTEND_URL", "http://localhost:3000")
+PASSWORD_RESET_TIMEOUT = int(env("PASSWORD_RESET_TIMEOUT", "3600"))
 REMINDER_LEAD_DAYS = int(env("REMINDER_LEAD_DAYS", "3"))
+WHATSAPP_PROVIDER = env("WHATSAPP_PROVIDER", "")
+TWILIO_ACCOUNT_SID = env("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = env("TWILIO_AUTH_TOKEN", "")
+TWILIO_WHATSAPP_FROM = env("TWILIO_WHATSAPP_FROM", "")
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in env("CORS_ALLOWED_ORIGINS", FRONTEND_URL).split(",") if origin.strip()]
 CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in env("CSRF_TRUSTED_ORIGINS", FRONTEND_URL).split(",") if origin.strip()]
+SESSION_COOKIE_SECURE = env("SESSION_COOKIE_SECURE", "False").lower() == "true"
+SESSION_COOKIE_SAMESITE = env("SESSION_COOKIE_SAMESITE", "Lax")
+CSRF_COOKIE_SECURE = env("CSRF_COOKIE_SECURE", "False").lower() == "true"
+CSRF_COOKIE_SAMESITE = env("CSRF_COOKIE_SAMESITE", "Lax")

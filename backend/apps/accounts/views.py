@@ -2,16 +2,19 @@ from django.conf import settings
 from django.contrib.auth import get_user_model, login, logout
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
+from django.db import transaction
 from django.template.loader import render_to_string
 from django.utils.decorators import method_decorator
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
 from django.views.decorators.csrf import ensure_csrf_cookie
-from rest_framework import permissions, status
+from rest_framework import decorators, permissions, status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .models import UserBankingProfile
 from .serializers import (
+    BankingProfileSerializer,
     ForgotPasswordSerializer,
     LoginSerializer,
     RegisterSerializer,
@@ -105,3 +108,26 @@ class ResetPasswordView(APIView):
 class MeView(APIView):
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class BankingProfileViewSet(viewsets.ModelViewSet):
+    serializer_class = BankingProfileSerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        return UserBankingProfile.objects.filter(user=self.request.user, is_active=True)
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.is_default = False
+        instance.save(update_fields=["is_active", "is_default", "updated_at"])
+
+    @decorators.action(detail=True, methods=["post"], url_path="set-default")
+    @transaction.atomic
+    def set_default(self, request, pk=None):
+        profile = self.get_object()
+        UserBankingProfile.objects.filter(user=request.user).update(is_default=False)
+        profile.is_default = True
+        profile.full_clean()
+        profile.save(update_fields=["is_default", "updated_at"])
+        return Response(self.get_serializer(profile).data, status=status.HTTP_200_OK)

@@ -1,8 +1,11 @@
 import {
+  BankingProfile,
+  BankingProfileInput,
   Client,
   Contractor,
   DashboardSummary,
   Invoice,
+  InvoiceEftSnapshot,
   InvoiceListResponse,
   InvoicePayment,
   PublicInvoicePaymentPage,
@@ -97,12 +100,6 @@ function invoicePayload(invoice: Invoice) {
     tax_type: invoice.tax_type,
     tax_rate: invoice.tax_rate,
     payment_page_enabled: invoice.payment_page_enabled ?? false,
-    eft_account_holder_name: invoice.eft_account_holder_name ?? "",
-    eft_bank_name: invoice.eft_bank_name ?? "",
-    eft_account_number: invoice.eft_account_number ?? "",
-    eft_account_type: invoice.eft_account_type ?? "",
-    eft_branch_code: invoice.eft_branch_code ?? "",
-    payment_reference: invoice.payment_reference ?? "",
     line_items: (invoice.line_items ?? []).map((item) => ({
       description: item.description,
       quantity: item.quantity,
@@ -153,6 +150,7 @@ export async function registerUser(payload: {
   confirm_password: string;
   first_name?: string;
   last_name?: string;
+  banking_profile?: BankingProfileInput;
 }) {
   return request<UserProfile>("/auth/register/", {
     method: "POST",
@@ -221,6 +219,37 @@ export async function fetchContractors() {
   return request<Contractor[]>("/contractors/");
 }
 
+export async function fetchBankingProfiles() {
+  return request<BankingProfile[]>("/banking-profiles/");
+}
+
+export async function createBankingProfile(payload: BankingProfileInput & { is_default?: boolean }) {
+  return request<BankingProfile>("/banking-profiles/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateBankingProfile(id: string, payload: Partial<BankingProfileInput> & { is_default?: boolean }) {
+  return request<BankingProfile>(`/banking-profiles/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteBankingProfile(id: string) {
+  return request<void>(`/banking-profiles/${id}/`, {
+    method: "DELETE",
+  });
+}
+
+export async function setDefaultBankingProfile(id: string) {
+  return request<BankingProfile>(`/banking-profiles/${id}/set-default/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 export async function createInvoice(payload: unknown) {
   return request<Invoice>("/invoices/", {
     method: "POST",
@@ -230,6 +259,17 @@ export async function createInvoice(payload: unknown) {
 
 export async function updateInvoice(id: string, payload: unknown) {
   return request<Invoice>(`/invoices/${id}/`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchInvoiceEftDetails(id: string) {
+  return request<InvoiceEftSnapshot>(`/invoices/${id}/eft-details/`);
+}
+
+export async function updateInvoiceEftDetails(id: string, payload: unknown) {
+  return request<InvoiceEftSnapshot>(`/invoices/${id}/eft-details/`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });

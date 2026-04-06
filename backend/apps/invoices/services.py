@@ -7,8 +7,11 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
+from apps.accounts.models import UserBankingProfile
+
 from .models import (
     Invoice,
+    InvoiceEftSourceType,
     InvoiceLineItem,
     InvoicePayment,
     InvoiceStatus,
@@ -37,8 +40,29 @@ def get_invoice_outstanding_amount(invoice: Invoice, amount_paid: Decimal | None
     return outstanding if outstanding > Decimal("0.00") else Decimal("0.00")
 
 
+def has_invoice_eft_snapshot(invoice: Invoice) -> bool:
+    return bool(invoice.eft_account_holder_name and invoice.eft_bank_name and invoice.eft_account_number)
+
+
+def get_invoice_eft_snapshot(invoice: Invoice) -> dict:
+    return {
+        "mode": invoice.eft_source_type or "",
+        "banking_profile_id": invoice.eft_source_profile_id,
+        "profile_name": invoice.eft_profile_name,
+        "account_holder_name": invoice.eft_account_holder_name,
+        "bank_name": invoice.eft_bank_name,
+        "account_number": invoice.eft_account_number,
+        "account_type": invoice.eft_account_type,
+        "branch_code": invoice.eft_branch_code,
+        "payment_reference": invoice.resolved_payment_reference,
+        "has_snapshot": has_invoice_eft_snapshot(invoice),
+    }
+
+
 def can_invoice_expose_payment_page(invoice: Invoice, amount_paid: Decimal | None = None) -> bool:
     if not invoice.payment_page_enabled:
+        return False
+    if not has_invoice_eft_snapshot(invoice):
         return False
     if invoice.status in {InvoiceStatus.PAID, InvoiceStatus.CANCELLED}:
         return False
@@ -160,6 +184,60 @@ def regenerate_invoice_public_token(invoice: Invoice) -> Invoice:
     return invoice
 
 
+def _save_invoice_eft_snapshot(invoice: Invoice) -> Invoice:
+    invoice.full_clean()
+    invoice.save(
+        update_fields=[
+            "eft_source_type",
+            "eft_source_profile",
+            "eft_profile_name",
+            "eft_account_holder_name",
+            "eft_bank_name",
+            "eft_account_number",
+            "eft_account_type",
+            "eft_branch_code",
+            "payment_reference",
+            "updated_at",
+        ]
+    )
+    return invoice
+
+
+@transaction.atomic
+def attach_saved_banking_profile_to_invoice(
+    invoice: Invoice,
+    banking_profile: UserBankingProfile,
+    payment_reference: str | None = None,
+) -> Invoice:
+    if invoice.owner_id and banking_profile.user_id != invoice.owner_id:
+        raise ValidationError({"banking_profile_id": "Banking profile does not belong to this invoice owner."})
+
+    invoice.eft_source_type = InvoiceEftSourceType.SAVED_PROFILE
+    invoice.eft_source_profile = banking_profile
+    invoice.eft_profile_name = banking_profile.profile_name
+    invoice.eft_account_holder_name = banking_profile.account_holder_name
+    invoice.eft_bank_name = banking_profile.bank_name
+    invoice.eft_account_number = banking_profile.account_number
+    invoice.eft_account_type = banking_profile.account_type
+    invoice.eft_branch_code = banking_profile.branch_code
+    invoice.payment_reference = payment_reference or banking_profile.default_payment_reference or invoice.invoice_number
+    return _save_invoice_eft_snapshot(invoice)
+
+
+@transaction.atomic
+def attach_manual_eft_details_to_invoice(invoice: Invoice, *, payment_reference: str | None = None, **details) -> Invoice:
+    invoice.eft_source_type = InvoiceEftSourceType.MANUAL
+    invoice.eft_source_profile = None
+    invoice.eft_profile_name = details.get("profile_name", "")
+    invoice.eft_account_holder_name = details.get("account_holder_name", "")
+    invoice.eft_bank_name = details.get("bank_name", "")
+    invoice.eft_account_number = details.get("account_number", "")
+    invoice.eft_account_type = details.get("account_type", "")
+    invoice.eft_branch_code = details.get("branch_code", "")
+    invoice.payment_reference = payment_reference or invoice.invoice_number
+    return _save_invoice_eft_snapshot(invoice)
+
+
 def add_months(source_date: date, months: int) -> date:
     year = source_date.year + ((source_date.month - 1 + months) // 12)
     month = ((source_date.month - 1 + months) % 12) + 1
@@ -227,6 +305,7 @@ def generate_invoice_from_recurring(recurring_invoice: RecurringInvoice, run_dat
         return None
 
     invoice = Invoice.objects.create(
+        owner=recurring_invoice.owner,
         client=recurring_invoice.client,
         recurring_invoice=recurring_invoice,
         invoice_number=build_recurring_invoice_number(recurring_invoice, scheduled_date),

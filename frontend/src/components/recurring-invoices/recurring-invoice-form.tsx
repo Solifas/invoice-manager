@@ -13,13 +13,31 @@ import {
   getErrorMessage,
   updateRecurringInvoice,
 } from "@/lib/api";
-import { RecurringInvoice, RecurringInvoiceLineItemTemplate, RecurringInvoiceStatus, TaxType } from "@/lib/types";
+import {
+  CurrencyCode,
+  RecurringInvoice,
+  RecurringInvoiceLineItemTemplate,
+  RecurringInvoiceStatus,
+  TaxType,
+} from "@/lib/types";
 
 const emptyItem = (): RecurringInvoiceLineItemTemplate => ({
   description: "",
   quantity: "1",
   unit_price: "0.00",
 });
+
+const currencyOptions: Array<{ value: CurrencyCode; label: string }> = [
+  { value: "ZAR", label: "ZAR · South African rand" },
+  { value: "USD", label: "USD · US dollar" },
+];
+
+function getClientContactLabel(client: { name: string; email: string; phone_number: string }) {
+  if (client.phone_number) {
+    return `${client.email} · ${client.phone_number}`;
+  }
+  return client.email;
+}
 
 const todayDateString = () => new Date().toISOString().slice(0, 10);
 
@@ -70,7 +88,7 @@ const defaultState: RecurringInvoice = {
   end_date: null,
   next_run_date: "",
   status: "active",
-  currency: "USD",
+  currency: "ZAR",
   payment_terms_days: 14,
   tax_type: "none",
   tax_rate: "0.00",
@@ -99,6 +117,8 @@ function toPayload(recurringInvoice: RecurringInvoice) {
 export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceId?: string }) {
   const router = useRouter();
   const [formState, setFormState] = useState<RecurringInvoice>(defaultState);
+  const [clientContactInput, setClientContactInput] = useState("");
+  const [clientInputError, setClientInputError] = useState("");
   const clientsQuery = useQuery({
     queryKey: ["clients"],
     queryFn: fetchClients,
@@ -120,6 +140,9 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
         client_id: recurringQuery.data.client?.id || recurringQuery.data.client_id,
         contractor_id: recurringQuery.data.contractor?.id || recurringQuery.data.contractor_id || null,
       });
+      if (recurringQuery.data.client) {
+        setClientContactInput(getClientContactLabel(recurringQuery.data.client));
+      }
     }
   }, [recurringQuery.data]);
 
@@ -144,11 +167,23 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
     if (recurringInvoiceId || !clientsQuery.data?.length || formState.client_id) {
       return;
     }
+    const defaultClient = clientsQuery.data[0];
     setFormState((current) => ({
       ...current,
-      client_id: current.client_id || clientsQuery.data[0].id || 0,
+      client_id: current.client_id || defaultClient.id || 0,
     }));
+    setClientContactInput(getClientContactLabel(defaultClient));
   }, [clientsQuery.data, formState.client_id, recurringInvoiceId]);
+
+  useEffect(() => {
+    if (!clientsQuery.data?.length) {
+      return;
+    }
+    const matchedClient = clientsQuery.data.find((client) => client.id === formState.client_id);
+    if (matchedClient) {
+      setClientContactInput((current) => current || getClientContactLabel(matchedClient));
+    }
+  }, [clientsQuery.data, formState.client_id]);
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -189,6 +224,11 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
       className="form-grid"
       onSubmit={(event) => {
         event.preventDefault();
+        if (!formState.client_id) {
+          setClientInputError("Enter a saved client email or phone number.");
+          return;
+        }
+        setClientInputError("");
         mutation.mutate();
       }}
     >
@@ -203,7 +243,7 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
         <aside className="card preview-card recurring-preview-card">
           <div className="preview-row">
             <span>Client</span>
-            <strong>{selectedClient?.name || "Choose a client"}</strong>
+            <strong>{selectedClient ? getClientContactLabel(selectedClient) : "Choose a client"}</strong>
           </div>
           <div className="preview-row">
             <span>Contractor</span>
@@ -249,19 +289,31 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
           </label>
           <label>
             <span className="field-label">Client</span>
-            <select
+            <input
               className="input"
-              onChange={(event) => setFormState((current) => ({ ...current, client_id: Number(event.target.value) }))}
+              list="recurring-client-contact-options"
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setClientContactInput(nextValue);
+                const matchedClient = clientsQuery.data?.find(
+                  (client) => getClientContactLabel(client) === nextValue || client.email === nextValue || client.phone_number === nextValue,
+                );
+                setFormState((current) => ({
+                  ...current,
+                  client_id: matchedClient?.id || 0,
+                }));
+                setClientInputError(matchedClient || nextValue === "" ? "" : "Choose a saved client from the suggested contact details.");
+              }}
+              placeholder="Type client email or phone number"
               required
-              value={formState.client_id}
-            >
-              <option value="0">Select a client</option>
+              value={clientContactInput}
+            />
+            <datalist id="recurring-client-contact-options">
               {clientsQuery.data?.map((client) => (
-                <option key={client.id} value={client.id}>
-                  {client.name} · {client.email}
-                </option>
+                <option key={client.id} value={getClientContactLabel(client)} />
               ))}
-            </select>
+            </datalist>
+            {clientInputError ? <span className="form-error">{clientInputError}</span> : null}
           </label>
           <label>
             <span className="field-label">Contractor</span>
@@ -282,14 +334,6 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
                 </option>
               ))}
             </select>
-          </label>
-          <label>
-            <span className="field-label">Currency</span>
-            <input
-              className="input"
-              onChange={(event) => setFormState((current) => ({ ...current, currency: event.target.value }))}
-              value={formState.currency}
-            />
           </label>
         </div>
       </section>
@@ -344,18 +388,6 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
               <option value="cancelled">Cancelled</option>
             </select>
           </label>
-          <label>
-            <span className="field-label">Payment terms (days)</span>
-            <input
-              className="input"
-              min="0"
-              onChange={(event) =>
-                setFormState((current) => ({ ...current, payment_terms_days: Number(event.target.value) }))
-              }
-              type="number"
-              value={formState.payment_terms_days}
-            />
-          </label>
           <div className="field-span recurring-schedule-preview">
             <span className="field-label">Schedule preview</span>
             <div className="recurring-schedule-preview-card">
@@ -377,11 +409,42 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
       <section className="card form-section">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">Billing defaults</p>
-            <h3 className="section-title">Tax behavior, payment terms, and carry-over notes</h3>
+            <p className="eyebrow">Pricing</p>
+            <h3 className="section-title">Choose the currency, payment terms, and tax behavior</h3>
+            <p className="subtle-copy section-copy">
+              These defaults flow into each generated invoice, so keep them aligned with how this client is usually billed.
+            </p>
           </div>
         </div>
         <div className="field-grid">
+          <label>
+            <span className="field-label">Currency</span>
+            <select
+              className="input"
+              onChange={(event) =>
+                setFormState((current) => ({ ...current, currency: event.target.value as CurrencyCode }))
+              }
+              value={formState.currency}
+            >
+              {currencyOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span className="field-label">Payment terms (days)</span>
+            <input
+              className="input"
+              min="0"
+              onChange={(event) =>
+                setFormState((current) => ({ ...current, payment_terms_days: Number(event.target.value) }))
+              }
+              type="number"
+              value={formState.payment_terms_days}
+            />
+          </label>
           <label>
             <span className="field-label">Tax type</span>
             <select
@@ -402,6 +465,7 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
               step="0.01"
               type="number"
               value={formState.tax_rate}
+              disabled={formState.tax_type === "none"}
             />
           </label>
           <label className="field-span">

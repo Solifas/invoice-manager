@@ -1,19 +1,25 @@
 from datetime import date, timedelta
 from decimal import Decimal
+from io import StringIO
 from unittest.mock import patch
 
 from kombu.exceptions import OperationalError as KombuOperationalError
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core import mail
+from django.test import TestCase
 from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.accounts.models import UserBankingProfile
 from apps.clients.models import Client
 from apps.contractors.models import Contractor
 from apps.invoices.models import (
+    CurrencyCode,
     Invoice,
+    InvoiceEftSourceType,
     InvoiceStatus,
     RecurringInvoice,
     RecurringInvoiceFrequency,
@@ -39,28 +45,47 @@ class InvoicePhaseTwoTests(APITestCase):
             email="owner@example.test",
             password="StrongPass123!",
         )
+        self.other_user = User.objects.create_user(
+            username="other@example.test",
+            email="other@example.test",
+            password="StrongPass123!",
+        )
         self.client.force_authenticate(self.user)
         self.client_record = Client.objects.create(
+            owner=self.user,
             name="Acme Co",
             email="billing@acme.test",
             address="1 Main Street",
             phone_number="+27123456789",
         )
         self.contractor = Contractor.objects.create(
+            owner=self.user,
             name="Nora Dev",
             email="nora@example.test",
             contact_number="+27111222333",
             address="44 Workshop Street",
         )
+        self.banking_profile = UserBankingProfile.objects.create(
+            user=self.user,
+            profile_name="Primary Business Account",
+            account_holder_name="Invoice Manager Pty Ltd",
+            bank_name="FNB",
+            account_number="1234567890",
+            account_type="Business",
+            branch_code="250655",
+            default_payment_reference="DEFAULT-REF",
+            is_default=True,
+        )
 
     def create_invoice(self, **overrides) -> Invoice:
         invoice = Invoice.objects.create(
+            owner=overrides.pop("owner", self.user),
             client=self.client_record,
             invoice_number=overrides.pop("invoice_number", "INV-1001"),
             issue_date=overrides.pop("issue_date", date.today()),
             due_date=overrides.pop("due_date", date.today() + timedelta(days=14)),
             status=overrides.pop("status", InvoiceStatus.SENT),
-            currency=overrides.pop("currency", "USD"),
+            currency=overrides.pop("currency", CurrencyCode.USD),
             tax_type=overrides.pop("tax_type", TaxType.PERCENTAGE),
             tax_rate=overrides.pop("tax_rate", Decimal("15.00")),
             payment_page_enabled=overrides.pop("payment_page_enabled", True),
@@ -85,7 +110,7 @@ class InvoicePhaseTwoTests(APITestCase):
             "due_date": str(date.today() + timedelta(days=7)),
             "status": InvoiceStatus.DRAFT,
             "notes": "Thanks",
-            "currency": "USD",
+            "currency": CurrencyCode.USD,
             "tax_type": TaxType.PERCENTAGE,
             "tax_rate": "10.00",
             "payment_page_enabled": True,
@@ -116,6 +141,8 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(response.data["amount_paid"], "0.00")
         self.assertEqual(response.data["outstanding_amount"], "440.00")
         self.assertTrue(response.data["public_payment_url"].endswith(response.data["public_token"]))
+        self.assertEqual(Invoice.objects.get(id=response.data["id"]).owner, self.user)
+        self.assertEqual(Client.objects.get(email="accounts@nova.test", owner=self.user).owner, self.user)
 
     def test_partial_payments_update_invoice_amounts_and_status(self):
         invoice = self.create_invoice(invoice_number="INV-2001")
@@ -195,7 +222,7 @@ class InvoicePhaseTwoTests(APITestCase):
             "due_date": str(date.today() + timedelta(days=7)),
             "status": InvoiceStatus.DRAFT,
             "notes": "Decimal quantity should fail.",
-            "currency": "USD",
+            "currency": CurrencyCode.USD,
             "tax_type": TaxType.NONE,
             "tax_rate": "0.00",
             "payment_page_enabled": False,
@@ -214,6 +241,33 @@ class InvoicePhaseTwoTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("line_items", response.data)
+
+    def test_invoice_create_rejects_unsupported_currency(self):
+        payload = {
+            "invoice_number": "INV-1010",
+            "issue_date": str(date.today()),
+            "due_date": str(date.today() + timedelta(days=7)),
+            "status": InvoiceStatus.DRAFT,
+            "notes": "Unsupported currency should fail.",
+            "currency": "EUR",
+            "tax_type": TaxType.NONE,
+            "tax_rate": "0.00",
+            "payment_page_enabled": False,
+            "client": {
+                "name": "Nova Studio",
+                "email": "accounts-eur@nova.test",
+                "address": "20 Market Road",
+                "phone_number": "+27123456789",
+            },
+            "line_items": [
+                {"description": "Consulting", "quantity": "1", "unit_price": "120.00"},
+            ],
+        }
+
+        response = self.client.post(reverse("invoice-list"), payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("currency", response.data)
 
     def test_dashboard_summary_uses_outstanding_amount_after_partial_payment(self):
         invoice = self.create_invoice(invoice_number="INV-2003")
@@ -284,6 +338,10 @@ class InvoicePhaseTwoTests(APITestCase):
 
     def test_public_payment_page_returns_expected_payload(self):
         invoice = self.create_invoice(invoice_number="INV-3001")
+        invoice.eft_profile_name = "Primary Business Account"
+        invoice.eft_source_type = InvoiceEftSourceType.SAVED_PROFILE
+        invoice.eft_source_profile = self.banking_profile
+        invoice.save(update_fields=["eft_profile_name", "eft_source_type", "eft_source_profile", "updated_at"])
         self.client.post(
             reverse("invoice-payments", args=[invoice.id]),
             {"amount": "87.50", "payment_date": str(date.today())},
@@ -298,6 +356,7 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(response.data["amount_paid"], "87.50")
         self.assertEqual(response.data["outstanding_amount"], "200.00")
         self.assertEqual(response.data["payment_reference"], "INV-3001")
+        self.assertEqual(response.data["eft_details"]["profile_name"], "Primary Business Account")
         self.assertEqual(response.data["eft_details"]["bank_name"], "Example Bank")
 
     def test_public_payment_page_returns_not_found_for_invalid_or_disabled_tokens(self):
@@ -393,6 +452,7 @@ class InvoicePhaseTwoTests(APITestCase):
 
     def test_recurring_invoice_generation_creates_invoice_and_advances_schedule(self):
         recurring_invoice = RecurringInvoice.objects.create(
+            owner=self.user,
             client=self.client_record,
             contractor=self.contractor,
             template_name="Monthly Retainer",
@@ -400,7 +460,7 @@ class InvoicePhaseTwoTests(APITestCase):
             start_date=date.today(),
             next_run_date=date.today(),
             status=RecurringInvoiceStatus.ACTIVE,
-            currency="USD",
+            currency=CurrencyCode.USD,
             payment_terms_days=7,
             tax_type=TaxType.PERCENTAGE,
             tax_rate=Decimal("10.00"),
@@ -425,13 +485,14 @@ class InvoicePhaseTwoTests(APITestCase):
 
     def test_recurring_invoice_generation_avoids_duplicates(self):
         recurring_invoice = RecurringInvoice.objects.create(
+            owner=self.user,
             client=self.client_record,
             template_name="Weekly Support",
             frequency=RecurringInvoiceFrequency.WEEKLY,
             start_date=date.today(),
             next_run_date=date.today(),
             status=RecurringInvoiceStatus.ACTIVE,
-            currency="USD",
+            currency=CurrencyCode.USD,
             payment_terms_days=7,
             tax_type=TaxType.NONE,
             tax_rate=Decimal("0.00"),
@@ -456,7 +517,7 @@ class InvoicePhaseTwoTests(APITestCase):
             "start_date": str(date.today()),
             "next_run_date": str(date.today()),
             "status": "active",
-            "currency": "USD",
+            "currency": CurrencyCode.USD,
             "payment_terms_days": 14,
             "tax_type": "none",
             "tax_rate": "0.00",
@@ -485,7 +546,7 @@ class InvoicePhaseTwoTests(APITestCase):
             "start_date": str(date.today()),
             "next_run_date": str(date.today()),
             "status": "active",
-            "currency": "USD",
+            "currency": CurrencyCode.USD,
             "payment_terms_days": 14,
             "tax_type": "none",
             "tax_rate": "0.00",
@@ -500,6 +561,28 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("line_items_template", response.data)
 
+    def test_recurring_invoice_api_rejects_unsupported_currency(self):
+        payload = {
+            "template_name": "Quarterly Audit",
+            "client_id": self.client_record.id,
+            "frequency": "quarterly",
+            "start_date": str(date.today()),
+            "status": "active",
+            "currency": "EUR",
+            "payment_terms_days": 14,
+            "tax_type": "none",
+            "tax_rate": "0.00",
+            "notes": "Quarterly recurring work.",
+            "line_items_template": [
+                {"description": "Audit", "quantity": "1", "unit_price": "900.00"},
+            ],
+        }
+
+        response = self.client.post(reverse("recurring-invoice-list"), payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("currency", response.data)
+
     def test_recurring_invoice_api_computes_next_run_date_from_schedule(self):
         payload = {
             "template_name": "Weekly Support",
@@ -507,7 +590,7 @@ class InvoicePhaseTwoTests(APITestCase):
             "frequency": "weekly",
             "start_date": str(date.today() - timedelta(days=7)),
             "status": "active",
-            "currency": "USD",
+            "currency": CurrencyCode.USD,
             "payment_terms_days": 14,
             "tax_type": "none",
             "tax_rate": "0.00",
@@ -524,13 +607,14 @@ class InvoicePhaseTwoTests(APITestCase):
 
     def test_process_due_recurring_invoices_catches_up_missed_runs(self):
         recurring_invoice = RecurringInvoice.objects.create(
+            owner=self.user,
             client=self.client_record,
             template_name="Weekly Support",
             frequency=RecurringInvoiceFrequency.WEEKLY,
             start_date=date.today() - timedelta(days=21),
             next_run_date=date.today() - timedelta(days=21),
             status=RecurringInvoiceStatus.ACTIVE,
-            currency="USD",
+            currency=CurrencyCode.USD,
             payment_terms_days=7,
             tax_type=TaxType.NONE,
             tax_rate=Decimal("0.00"),
@@ -553,3 +637,333 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(contractor_response.status_code, status.HTTP_200_OK)
         self.assertEqual(client_response.data[0]["name"], self.client_record.name)
         self.assertEqual(contractor_response.data[0]["name"], self.contractor.name)
+
+    def test_user_only_sees_their_own_invoices_and_dashboard_data(self):
+        other_client = Client.objects.create(
+            owner=self.other_user,
+            name="Other Co",
+            email="other-client@example.test",
+            address="2 Side Street",
+            phone_number="+27110000000",
+        )
+        other_invoice = Invoice.objects.create(
+            owner=self.other_user,
+            client=other_client,
+            invoice_number="INV-OTHER-001",
+            issue_date=date.today(),
+            due_date=date.today() + timedelta(days=7),
+            status=InvoiceStatus.SENT,
+            currency=CurrencyCode.USD,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+        )
+        other_invoice.line_items.create(description="Other work", quantity=1, unit_price=Decimal("200.00"))
+        recalculate_invoice_totals(other_invoice)
+
+        own_invoice = self.create_invoice(invoice_number="INV-OWN-001")
+
+        list_response = self.client.get(reverse("invoice-list"))
+        summary_response = self.client.get(reverse("invoice-dashboard-summary"))
+
+        invoice_numbers = {result["invoice_number"] for result in list_response.data["results"]}
+        self.assertIn(own_invoice.invoice_number, invoice_numbers)
+        self.assertNotIn(other_invoice.invoice_number, invoice_numbers)
+        self.assertEqual(summary_response.data["total_invoices"], 1)
+
+    def test_user_cannot_access_another_users_invoice_or_recurring_template(self):
+        other_client = Client.objects.create(
+            owner=self.other_user,
+            name="Other Co",
+            email="other-client-2@example.test",
+            address="2 Side Street",
+            phone_number="+27110000001",
+        )
+        other_invoice = Invoice.objects.create(
+            owner=self.other_user,
+            client=other_client,
+            invoice_number="INV-OTHER-002",
+            issue_date=date.today(),
+            due_date=date.today() + timedelta(days=7),
+            status=InvoiceStatus.SENT,
+            currency=CurrencyCode.USD,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+        )
+        other_invoice.line_items.create(description="Other work", quantity=1, unit_price=Decimal("200.00"))
+        recalculate_invoice_totals(other_invoice)
+
+        other_contractor = Contractor.objects.create(owner=self.other_user, name="Other Contractor")
+        other_recurring = RecurringInvoice.objects.create(
+            owner=self.other_user,
+            client=other_client,
+            contractor=other_contractor,
+            template_name="Other Retainer",
+            frequency=RecurringInvoiceFrequency.MONTHLY,
+            start_date=date.today(),
+            next_run_date=date.today(),
+            status=RecurringInvoiceStatus.ACTIVE,
+            currency=CurrencyCode.USD,
+            payment_terms_days=14,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+            line_items_template=[{"description": "Retainer", "quantity": "1", "unit_price": "500.00"}],
+        )
+
+        invoice_response = self.client.get(reverse("invoice-detail", args=[other_invoice.id]))
+        recurring_response = self.client.get(reverse("recurring-invoice-detail", args=[other_recurring.id]))
+
+        self.assertEqual(invoice_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(recurring_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_attach_saved_banking_profile_to_invoice_creates_snapshot(self):
+        invoice = self.create_invoice(invoice_number="INV-5001")
+
+        response = self.client.put(
+            reverse("invoice-eft-details", args=[invoice.id]),
+            {
+                "mode": "saved_profile",
+                "banking_profile_id": self.banking_profile.id,
+                "payment_reference": "INV-5001-REF",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.eft_source_type, InvoiceEftSourceType.SAVED_PROFILE)
+        self.assertEqual(invoice.eft_source_profile, self.banking_profile)
+        self.assertEqual(invoice.eft_profile_name, self.banking_profile.profile_name)
+        self.assertEqual(invoice.eft_account_holder_name, self.banking_profile.account_holder_name)
+        self.assertEqual(invoice.payment_reference, "INV-5001-REF")
+
+    def test_attach_manual_eft_details_to_invoice_creates_snapshot(self):
+        invoice = self.create_invoice(invoice_number="INV-5002", payment_page_enabled=False)
+
+        response = self.client.put(
+            reverse("invoice-eft-details", args=[invoice.id]),
+            {
+                "mode": "manual",
+                "profile_name": "One-off settlement account",
+                "account_holder_name": "Manual Holder Pty Ltd",
+                "bank_name": "ABSA",
+                "account_number": "9999999999",
+                "account_type": "Business Cheque",
+                "branch_code": "632005",
+                "payment_reference": "MANUAL-5002",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.eft_source_type, InvoiceEftSourceType.MANUAL)
+        self.assertIsNone(invoice.eft_source_profile)
+        self.assertEqual(invoice.eft_profile_name, "One-off settlement account")
+        self.assertEqual(invoice.eft_bank_name, "ABSA")
+        self.assertEqual(invoice.payment_reference, "MANUAL-5002")
+
+    def test_switching_banking_profile_source_does_not_change_existing_snapshot_when_profile_updates(self):
+        invoice = self.create_invoice(invoice_number="INV-5003")
+        self.client.put(
+            reverse("invoice-eft-details", args=[invoice.id]),
+            {
+                "mode": "saved_profile",
+                "banking_profile_id": self.banking_profile.id,
+                "payment_reference": "INV-5003-REF",
+            },
+            format="json",
+        )
+
+        self.banking_profile.bank_name = "Nedbank"
+        self.banking_profile.account_holder_name = "Changed Holder Pty Ltd"
+        self.banking_profile.save(update_fields=["bank_name", "account_holder_name", "updated_at"])
+        invoice.refresh_from_db()
+
+        self.assertEqual(invoice.eft_bank_name, "FNB")
+        self.assertEqual(invoice.eft_account_holder_name, "Invoice Manager Pty Ltd")
+
+    def test_switching_between_saved_profile_and_manual_updates_snapshot(self):
+        invoice = self.create_invoice(invoice_number="INV-5004")
+        self.client.put(
+            reverse("invoice-eft-details", args=[invoice.id]),
+            {
+                "mode": "saved_profile",
+                "banking_profile_id": self.banking_profile.id,
+            },
+            format="json",
+        )
+
+        response = self.client.put(
+            reverse("invoice-eft-details", args=[invoice.id]),
+            {
+                "mode": "manual",
+                "profile_name": "Manual fallback",
+                "account_holder_name": "Fallback Holder Pty Ltd",
+                "bank_name": "Capitec",
+                "account_number": "1111111111",
+                "account_type": "Business",
+                "branch_code": "470010",
+                "payment_reference": "INV-5004-MANUAL",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.eft_source_type, InvoiceEftSourceType.MANUAL)
+        self.assertIsNone(invoice.eft_source_profile)
+        self.assertEqual(invoice.eft_bank_name, "Capitec")
+
+    def test_user_cannot_attach_another_users_banking_profile(self):
+        other_profile = UserBankingProfile.objects.create(
+            user=self.other_user,
+            profile_name="Other account",
+            account_holder_name="Other Pty Ltd",
+            bank_name="FNB",
+            account_number="7777777777",
+            is_default=True,
+        )
+        invoice = self.create_invoice(invoice_number="INV-5005")
+
+        response = self.client.put(
+            reverse("invoice-eft-details", args=[invoice.id]),
+            {
+                "mode": "saved_profile",
+                "banking_profile_id": other_profile.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("banking_profile_id", response.data)
+
+    def test_public_payment_page_not_found_when_snapshot_missing(self):
+        invoice = self.create_invoice(invoice_number="INV-5006")
+        invoice.eft_account_holder_name = ""
+        invoice.eft_bank_name = ""
+        invoice.eft_account_number = ""
+        invoice.save(update_fields=["eft_account_holder_name", "eft_bank_name", "eft_account_number", "updated_at"])
+
+        response = self.client.get(reverse("public-invoice-payment", args=[invoice.public_token]))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class LegacyOwnerBackfillCommandTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="owner@example.test",
+            email="owner@example.test",
+            password="StrongPass123!",
+        )
+        self.other_user = User.objects.create_user(
+            username="other@example.test",
+            email="other@example.test",
+            password="StrongPass123!",
+        )
+
+    def test_dry_run_does_not_persist_changes(self):
+        client = Client.objects.create(name="Legacy Client", email="legacy-client@example.test")
+        contractor = Contractor.objects.create(name="Legacy Contractor")
+        invoice = Invoice.objects.create(
+            client=client,
+            invoice_number="INV-LEGACY-001",
+            issue_date=date.today(),
+            due_date=date.today() + timedelta(days=7),
+            status=InvoiceStatus.SENT,
+            currency=CurrencyCode.ZAR,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+        )
+        recurring = RecurringInvoice.objects.create(
+            client=client,
+            contractor=contractor,
+            template_name="Legacy Template",
+            frequency=RecurringInvoiceFrequency.MONTHLY,
+            start_date=date.today(),
+            next_run_date=date.today(),
+            status=RecurringInvoiceStatus.ACTIVE,
+            currency=CurrencyCode.ZAR,
+            payment_terms_days=14,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+            line_items_template=[{"description": "Support", "quantity": "1", "unit_price": "100.00"}],
+        )
+
+        out = StringIO()
+        call_command("backfill_legacy_owners", owner_email=self.user.email, stdout=out)
+
+        client.refresh_from_db()
+        contractor.refresh_from_db()
+        invoice.refresh_from_db()
+        recurring.refresh_from_db()
+
+        self.assertIsNone(client.owner)
+        self.assertIsNone(contractor.owner)
+        self.assertIsNone(invoice.owner)
+        self.assertIsNone(recurring.owner)
+        self.assertIn("Dry run only", out.getvalue())
+
+    def test_apply_assigns_ownerless_records_to_selected_owner(self):
+        client = Client.objects.create(name="Legacy Client", email="legacy-client-2@example.test")
+        contractor = Contractor.objects.create(name="Legacy Contractor")
+        invoice = Invoice.objects.create(
+            client=client,
+            invoice_number="INV-LEGACY-002",
+            issue_date=date.today(),
+            due_date=date.today() + timedelta(days=7),
+            status=InvoiceStatus.SENT,
+            currency=CurrencyCode.ZAR,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+        )
+        recurring = RecurringInvoice.objects.create(
+            client=client,
+            contractor=contractor,
+            template_name="Legacy Template 2",
+            frequency=RecurringInvoiceFrequency.MONTHLY,
+            start_date=date.today(),
+            next_run_date=date.today(),
+            status=RecurringInvoiceStatus.ACTIVE,
+            currency=CurrencyCode.ZAR,
+            payment_terms_days=14,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+            line_items_template=[{"description": "Support", "quantity": "1", "unit_price": "100.00"}],
+        )
+
+        call_command("backfill_legacy_owners", owner_email=self.user.email, apply=True)
+
+        client.refresh_from_db()
+        contractor.refresh_from_db()
+        invoice.refresh_from_db()
+        recurring.refresh_from_db()
+
+        self.assertEqual(client.owner, self.user)
+        self.assertEqual(contractor.owner, self.user)
+        self.assertEqual(invoice.owner, self.user)
+        self.assertEqual(recurring.owner, self.user)
+
+    def test_apply_skips_records_that_point_to_other_owners_data(self):
+        owned_client = Client.objects.create(
+            owner=self.other_user,
+            name="Other Client",
+            email="other-legacy-client@example.test",
+        )
+        invoice = Invoice.objects.create(
+            client=owned_client,
+            invoice_number="INV-LEGACY-003",
+            issue_date=date.today(),
+            due_date=date.today() + timedelta(days=7),
+            status=InvoiceStatus.SENT,
+            currency=CurrencyCode.ZAR,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+        )
+
+        out = StringIO()
+        call_command("backfill_legacy_owners", owner_email=self.user.email, apply=True, stdout=out)
+
+        invoice.refresh_from_db()
+        self.assertIsNone(invoice.owner)
+        self.assertIn("skipped because client", out.getvalue())

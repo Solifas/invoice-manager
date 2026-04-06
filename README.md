@@ -16,6 +16,7 @@ Full-stack invoice management MVP for small businesses and freelancers.
 - Partial payments with invoice payment history
 - Email and WhatsApp reminder channels
 - Recurring invoice templates with scheduled generation
+- Reusable owner banking profiles with per-invoice EFT snapshots
 
 ## Authentication architecture
 
@@ -24,6 +25,7 @@ Full-stack invoice management MVP for small businesses and freelancers.
 - Internal API routes require an authenticated session by default.
 - The frontend sends credentials with every internal API request and includes the CSRF token for unsafe requests.
 - Password reset uses Django's secure, time-limited token generator and sends reset links to the frontend route at `/reset-password`.
+- Registration can optionally create the user's first reusable banking profile, but banking setup is never required to create an account.
 - The public EFT payment flow at `/pay/{token}` and `/api/public/pay/{token}/` remains accessible without login.
 
 This approach fits the existing browser-based architecture cleanly:
@@ -141,6 +143,7 @@ Protected routes:
 - `/dashboard`
 - `/invoices/*`
 - `/recurring-invoices/*`
+- `/settings/banking-details`
 
 Public routes:
 
@@ -181,7 +184,14 @@ docker compose up --build
 - `POST /api/invoices/{id}/payments/`
 - `PATCH /api/payments/{id}/`
 - `POST /api/invoices/{id}/payment-page/regenerate-token/`
+- `GET /api/invoices/{id}/eft-details/`
+- `PUT /api/invoices/{id}/eft-details/`
 - `GET /api/invoices/{id}/pdf/`
+- `GET /api/banking-profiles/`
+- `POST /api/banking-profiles/`
+- `PATCH /api/banking-profiles/{id}/`
+- `DELETE /api/banking-profiles/{id}/`
+- `POST /api/banking-profiles/{id}/set-default/`
 - `GET /api/public/pay/{token}/`
 - `GET /api/recurring-invoices/`
 - `POST /api/recurring-invoices/`
@@ -199,7 +209,16 @@ Register:
   "password": "StrongPass123!",
   "confirm_password": "StrongPass123!",
   "first_name": "Ava",
-  "last_name": "Owner"
+  "last_name": "Owner",
+  "banking_profile": {
+    "profile_name": "Primary operating account",
+    "account_holder_name": "Ava Owner Pty Ltd",
+    "bank_name": "FNB",
+    "account_number": "12345678901",
+    "account_type": "Business Cheque",
+    "branch_code": "250655",
+    "default_payment_reference": "AVA-PRIMARY"
+  }
 }
 ```
 
@@ -244,12 +263,6 @@ Reset password:
   "tax_type": "percentage",
   "tax_rate": "15.00",
   "payment_page_enabled": true,
-  "eft_account_holder_name": "Invoice Manager Pty Ltd",
-  "eft_bank_name": "Example Bank",
-  "eft_account_number": "1234567890",
-  "eft_account_type": "Business",
-  "eft_branch_code": "250655",
-  "payment_reference": "",
   "client": {
     "name": "Atlas Creative",
     "email": "billing@atlas.test",
@@ -268,6 +281,31 @@ Reset password:
       "unit_price": "250.00"
     }
   ]
+}
+```
+
+Example invoice EFT setup using a saved profile:
+
+```json
+{
+  "mode": "saved_profile",
+  "banking_profile_id": 3,
+  "payment_reference": "INV-2026-010"
+}
+```
+
+Example invoice EFT setup using manual details:
+
+```json
+{
+  "mode": "manual",
+  "profile_name": "One-off account",
+  "account_holder_name": "Ava Owner Pty Ltd",
+  "bank_name": "ABSA",
+  "account_number": "4096150463",
+  "account_type": "Business Cheque",
+  "branch_code": "632005",
+  "payment_reference": "INV-2026-010"
 }
 ```
 
@@ -333,6 +371,9 @@ Reset password:
 - Password reset emails always return a safe generic response, even for unknown email addresses.
 - Password reset links are time-limited using Django's secure token generator.
 - Session auth requires frontend requests to include credentials and CSRF headers for unsafe methods.
+- Users may have zero, one, or many reusable banking profiles.
+- Invoice payment pages use an invoice-level EFT snapshot, not live mutable banking profiles.
+- Editing a saved banking profile later does not silently change historical invoices that already copied it.
 
 - Due date cannot be before issue date.
 - Quantity must be a whole-number unit and unit price cannot be negative.
@@ -342,6 +383,7 @@ Reset password:
 - Line totals, subtotal, tax, and grand total are recalculated server-side.
 - Paid, outstanding, and overdue states are derived server-side from due dates and recorded payments.
 - Public payment pages only expose invoice summary data plus EFT details and are hidden when disabled.
+- Public payment pages return EFT instructions only when the invoice has a saved snapshot attached.
 - WhatsApp reminders fail fast when the client has no phone number or no provider is configured.
 - Recurring invoices generate draft invoices and advance `next_run_date` without duplicating the same cycle.
 
@@ -359,6 +401,9 @@ The included tests cover:
 - invoice total recalculation
 - partial payment aggregation and status transitions
 - public EFT payment page access and invalid token handling
+- banking profile CRUD and default-profile rules
+- optional banking-profile registration flow
+- invoice EFT snapshot creation and switching between saved/manual modes
 - dashboard summary outstanding-balance flow
 - email and WhatsApp reminder dispatch behavior
 - recurring invoice generation and duplicate prevention
@@ -373,6 +418,9 @@ The included tests cover:
 ## Payment pages and reminders
 
 - Each invoice gets a secure `public_token` and an optional public payment page under `/pay/{token}`.
+- Owners can manage reusable banking profiles at `/settings/banking-details`.
+- When an invoice uses EFT, the owner either selects a saved profile or enters manual one-off details for that invoice.
+- The selected profile is copied into the invoice snapshot; the public page never reads directly from mutable profile rows.
 - The internal invoice detail page exposes copy/open actions plus token regeneration for payment pages.
 - Public payment pages show invoice totals, amount already paid, outstanding balance, EFT banking details, and the payment reference.
 - `POST /api/invoices/{id}/remind/` accepts `email` or `whatsapp`.
@@ -382,8 +430,10 @@ The included tests cover:
 
 `python manage.py seed_invoice_data` now creates:
 
-- an EFT-enabled invoice with a public payment page
-- a partially paid overdue invoice
+- demo and `solifas@extratrx.com` owner accounts
+- a default reusable banking profile for each seeded owner
+- an invoice using a saved-profile EFT snapshot
+- an invoice using manual invoice-only EFT details
 - a fully paid invoice with recorded payment history
 - a contractor record used by a recurring invoice template
 - a recurring invoice template ready for scheduler testing

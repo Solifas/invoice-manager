@@ -3,12 +3,52 @@ export type TaxType = "none" | "percentage";
 export type ReminderChannel = "email" | "whatsapp";
 export type RecurringInvoiceFrequency = "weekly" | "monthly" | "quarterly";
 export type RecurringInvoiceStatus = "active" | "paused" | "cancelled";
+export type CurrencyCode = "ZAR" | "USD";
+export type InvoiceEftMode = "saved_profile" | "manual" | "";
 
 export interface UserProfile {
   id: number;
   email: string;
   first_name: string;
   last_name: string;
+}
+
+export interface BankingProfile {
+  id: number;
+  profile_name: string;
+  account_holder_name: string;
+  bank_name: string;
+  account_number: string;
+  account_type: string;
+  branch_code: string;
+  default_payment_reference: string;
+  is_default: boolean;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface BankingProfileInput {
+  profile_name: string;
+  account_holder_name: string;
+  bank_name: string;
+  account_number: string;
+  account_type?: string;
+  branch_code?: string;
+  default_payment_reference?: string;
+}
+
+export interface InvoiceEftSnapshot {
+  mode: InvoiceEftMode;
+  banking_profile_id: number | null;
+  profile_name: string;
+  account_holder_name: string;
+  bank_name: string;
+  account_number: string;
+  account_type: string;
+  branch_code: string;
+  payment_reference: string;
+  has_snapshot: boolean;
 }
 
 export interface Client {
@@ -54,7 +94,7 @@ export interface Invoice {
   due_date: string;
   status: InvoiceStatus;
   notes: string;
-  currency: string;
+  currency: CurrencyCode;
   tax_type: TaxType;
   tax_rate: string;
   subtotal: string;
@@ -66,6 +106,10 @@ export interface Invoice {
   public_token: string;
   public_payment_url: string;
   payment_link_available: boolean;
+  eft_snapshot: InvoiceEftSnapshot;
+  eft_source_type?: InvoiceEftMode;
+  eft_source_profile?: number | null;
+  eft_profile_name?: string;
   eft_account_holder_name: string;
   eft_bank_name: string;
   eft_account_number: string;
@@ -85,7 +129,7 @@ export interface InvoiceSummary {
   issue_date: string;
   due_date: string;
   status: InvoiceStatus;
-  currency: string;
+  currency: CurrencyCode;
   total_amount: string;
   subtotal: string;
   amount_paid: string;
@@ -107,6 +151,7 @@ export interface DashboardSummary {
 }
 
 export interface PublicPaymentEftDetails {
+  profile_name: string;
   account_holder_name: string;
   bank_name: string;
   account_number: string;
@@ -147,7 +192,7 @@ export interface RecurringInvoice {
   end_date: string | null;
   next_run_date: string | null;
   status: RecurringInvoiceStatus;
-  currency: string;
+  currency: CurrencyCode;
   payment_terms_days: number;
   tax_type: TaxType;
   tax_rate: string;

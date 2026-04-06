@@ -11,8 +11,9 @@ from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
+from apps.accounts.models import UserBankingProfile
 from apps.clients.models import Client
-from apps.invoices.models import Invoice, InvoiceStatus, TaxType
+from apps.invoices.models import CurrencyCode, Invoice, InvoiceStatus, TaxType
 from apps.invoices.services import recalculate_invoice_totals
 
 
@@ -35,18 +36,20 @@ class AuthenticationApiTests(APITestCase):
         )
 
         self.invoice_client = Client.objects.create(
+            owner=self.user,
             name="Northwind Studio",
             email="billing@northwind.test",
             address="54 Main Road",
             phone_number="+27123456789",
         )
         self.invoice = Invoice.objects.create(
+            owner=self.user,
             client=self.invoice_client,
             invoice_number="INV-AUTH-001",
             issue_date=date.today(),
             due_date=date.today() + timedelta(days=7),
             status=InvoiceStatus.SENT,
-            currency="USD",
+            currency=CurrencyCode.USD,
             tax_type=TaxType.NONE,
             tax_rate=Decimal("0.00"),
             payment_page_enabled=True,
@@ -78,6 +81,52 @@ class AuthenticationApiTests(APITestCase):
         me_response = self.client.get(reverse("auth-me"))
         self.assertEqual(me_response.status_code, status.HTTP_200_OK)
         self.assertEqual(me_response.data["email"], "newuser@example.test")
+
+    def test_register_optionally_creates_default_banking_profile(self):
+        response = self.client.post(
+            reverse("auth-register"),
+            {
+                "email": "banked@example.test",
+                "password": "AnotherStrong123!",
+                "confirm_password": "AnotherStrong123!",
+                "first_name": "Banked",
+                "last_name": "User",
+                "banking_profile": {
+                    "profile_name": "Primary business account",
+                    "account_holder_name": "Banked User Pty Ltd",
+                    "bank_name": "FNB",
+                    "account_number": "12345678901",
+                    "account_type": "Business Cheque",
+                    "branch_code": "250655",
+                    "default_payment_reference": "BANKED-001",
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(email="banked@example.test")
+        profile = UserBankingProfile.objects.get(user=user)
+        self.assertEqual(profile.profile_name, "Primary business account")
+        self.assertTrue(profile.is_default)
+
+    def test_register_rejects_invalid_partial_optional_banking_details(self):
+        response = self.client.post(
+            reverse("auth-register"),
+            {
+                "email": "partial-bank@example.test",
+                "password": "AnotherStrong123!",
+                "confirm_password": "AnotherStrong123!",
+                "banking_profile": {
+                    "profile_name": "Incomplete profile",
+                    "bank_name": "FNB",
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("banking_profile", response.data)
 
     def test_register_rejects_duplicate_email(self):
         response = self.client.post(
@@ -210,3 +259,82 @@ class AuthenticationApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["invoice_number"], self.invoice.invoice_number)
+
+    def test_banking_profile_crud_and_default_switching(self):
+        self.client.force_authenticate(self.user)
+
+        create_response = self.client.post(
+            reverse("banking-profile-list"),
+            {
+                "profile_name": "Primary account",
+                "account_holder_name": "Owner User Pty Ltd",
+                "bank_name": "FNB",
+                "account_number": "12345678901",
+                "account_type": "Business Cheque",
+                "branch_code": "250655",
+                "default_payment_reference": "OWNER-001",
+                "is_default": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        first_profile_id = create_response.data["id"]
+
+        second_response = self.client.post(
+            reverse("banking-profile-list"),
+            {
+                "profile_name": "Secondary account",
+                "account_holder_name": "Owner User Pty Ltd",
+                "bank_name": "ABSA",
+                "account_number": "22222222222",
+                "account_type": "Business Cheque",
+                "branch_code": "632005",
+                "default_payment_reference": "OWNER-002",
+                "is_default": False,
+            },
+            format="json",
+        )
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+
+        set_default_response = self.client.post(
+            reverse("banking-profile-set-default", args=[second_response.data["id"]]),
+            {},
+            format="json",
+        )
+        self.assertEqual(set_default_response.status_code, status.HTTP_200_OK)
+
+        first_profile = UserBankingProfile.objects.get(id=first_profile_id)
+        second_profile = UserBankingProfile.objects.get(id=second_response.data["id"])
+        self.assertFalse(first_profile.is_default)
+        self.assertTrue(second_profile.is_default)
+
+        patch_response = self.client.patch(
+            reverse("banking-profile-detail", args=[second_profile.id]),
+            {"bank_name": "Nedbank"},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.data["bank_name"], "Nedbank")
+
+    def test_banking_profile_access_is_user_scoped(self):
+        other_profile = UserBankingProfile.objects.create(
+            user=self.user,
+            profile_name="Primary account",
+            account_holder_name="Owner User Pty Ltd",
+            bank_name="FNB",
+            account_number="12345678901",
+            account_type="Business Cheque",
+            branch_code="250655",
+            default_payment_reference="OWNER-001",
+            is_default=True,
+        )
+        other_user = User.objects.create_user(
+            username="other-banking@example.test",
+            email="other-banking@example.test",
+            password="StrongPass123!",
+        )
+        self.client.force_authenticate(other_user)
+
+        detail_response = self.client.get(reverse("banking-profile-detail", args=[other_profile.id]))
+        self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)

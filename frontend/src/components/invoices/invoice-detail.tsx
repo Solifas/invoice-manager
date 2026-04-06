@@ -232,6 +232,13 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
                   ? "Payment link is unavailable because this invoice is cancelled."
                   : "Public EFT page is disabled."}
           </p>
+          <div className="detail-copy-list">
+            <p>Source: {invoice.eft_snapshot.mode ? invoice.eft_snapshot.mode.replace("_", " ") : "No EFT details attached"}</p>
+            <p>Profile: {invoice.eft_snapshot.profile_name || "Not set"}</p>
+            <p>Account holder: {invoice.eft_snapshot.account_holder_name || "Not set"}</p>
+            <p>Bank: {invoice.eft_snapshot.bank_name || "Not set"}</p>
+            <p>Reference: {invoice.eft_snapshot.payment_reference || invoice.invoice_number}</p>
+          </div>
           <div className="stack-actions action-pill-row">
             <button className="button button-secondary action-chip" disabled={!paymentLinkAvailable} onClick={copyPaymentLink} type="button">
               {copyState === "copied" ? "Link copied" : "Copy link"}

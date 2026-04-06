@@ -16,6 +16,8 @@ from .serializers import (
     ClientSerializer,
     ContractorSerializer,
     DashboardSummarySerializer,
+    InvoiceEftDetailsUpdateSerializer,
+    InvoiceEftSnapshotSerializer,
     InvoiceLineItemSerializer,
     InvoiceListSerializer,
     InvoicePaymentSerializer,
@@ -24,7 +26,14 @@ from .serializers import (
     RecurringInvoiceSerializer,
     ReminderRequestSerializer,
 )
-from .services import recalculate_invoice_totals, regenerate_invoice_public_token, sync_invoice_status, sync_invoices_status
+from .services import (
+    get_invoice_eft_snapshot,
+    has_invoice_eft_snapshot,
+    recalculate_invoice_totals,
+    regenerate_invoice_public_token,
+    sync_invoice_status,
+    sync_invoices_status,
+)
 
 
 class InvoiceViewSet(viewsets.ModelViewSet):
@@ -34,7 +43,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     ordering_fields = ("issue_date", "due_date", "total_amount", "invoice_number")
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset().filter(owner=self.request.user)
         status_group = self.request.query_params.get("status_group")
         if status_group == "unpaid":
             queryset = queryset.exclude(status=InvoiceStatus.CANCELLED).exclude(status=InvoiceStatus.PAID)
@@ -64,7 +73,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
     @decorators.action(detail=False, methods=["get"], url_path="dashboard-summary")
     def dashboard_summary(self, request):
-        serializer = DashboardSummarySerializer(get_dashboard_summary())
+        serializer = DashboardSummarySerializer(get_dashboard_summary(owner=request.user))
         return Response(serializer.data)
 
     @decorators.action(detail=True, methods=["post"], url_path="send-reminder")
@@ -113,6 +122,17 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(invoice)
         return Response(serializer.data)
 
+    @decorators.action(detail=True, methods=["get", "put"], url_path="eft-details")
+    def eft_details(self, request, pk=None):
+        invoice = self.get_object()
+        if request.method == "GET":
+            return Response(InvoiceEftSnapshotSerializer(get_invoice_eft_snapshot(invoice)).data)
+
+        serializer = InvoiceEftDetailsUpdateSerializer(data=request.data, context={"request": request, "invoice": invoice})
+        serializer.is_valid(raise_exception=True)
+        updated_invoice = serializer.save()
+        return Response(InvoiceEftSnapshotSerializer(get_invoice_eft_snapshot(updated_invoice)).data)
+
     @decorators.action(detail=True, methods=["get"], url_path="pdf")
     def pdf(self, request, pk=None):
         invoice = self.get_object()
@@ -137,6 +157,8 @@ class PublicInvoicePaymentView(APIView):
             raise Http404 from exc
 
         sync_invoice_status(invoice)
+        if not has_invoice_eft_snapshot(invoice):
+            raise Http404
         serializer = PublicInvoicePaymentSerializer(invoice)
         return Response(serializer.data)
 
@@ -150,17 +172,26 @@ class InvoiceLineItemViewSet(
     serializer_class = InvoiceLineItemSerializer
     filterset_fields = ("invoice",)
 
+    def get_queryset(self):
+        return super().get_queryset().filter(invoice__owner=self.request.user)
+
 
 class ClientLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     queryset = Client.objects.all()
     serializer_class = ClientSerializer
     pagination_class = None
 
+    def get_queryset(self):
+        return super().get_queryset().filter(owner=self.request.user)
+
 
 class ContractorLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     queryset = Contractor.objects.all()
     serializer_class = ContractorSerializer
     pagination_class = None
+
+    def get_queryset(self):
+        return super().get_queryset().filter(owner=self.request.user)
 
 
 class InvoicePaymentViewSet(
@@ -172,6 +203,9 @@ class InvoicePaymentViewSet(
     serializer_class = InvoicePaymentSerializer
     http_method_names = ["get", "patch", "head", "options"]
 
+    def get_queryset(self):
+        return super().get_queryset().filter(invoice__owner=self.request.user)
+
     def get_serializer_context(self):
         context = super().get_serializer_context()
         if self.action in {"partial_update", "update"}:
@@ -182,6 +216,9 @@ class InvoicePaymentViewSet(
 class RecurringInvoiceViewSet(viewsets.ModelViewSet):
     queryset = RecurringInvoice.objects.select_related("client", "contractor").all()
     serializer_class = RecurringInvoiceSerializer
+
+    def get_queryset(self):
+        return super().get_queryset().filter(owner=self.request.user)
 
     def perform_destroy(self, instance):
         instance.status = "cancelled"

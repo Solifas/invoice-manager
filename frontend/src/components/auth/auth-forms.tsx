@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useMemo, useState } from "react";
 
 import { forgotPassword, getErrorMessage, loginUser, registerUser, resetPassword } from "@/lib/api";
+import { getBankNameOptions } from "@/lib/banking";
 import { useAuth } from "@/components/auth/auth-provider";
 
 function AuthLayout({
@@ -95,12 +96,22 @@ export function LoginForm() {
 export function RegisterForm() {
   const router = useRouter();
   const { setAuthenticatedUser } = useAuth();
+  const [includeBankingProfile, setIncludeBankingProfile] = useState(false);
   const [formState, setFormState] = useState({
     email: "",
     first_name: "",
     last_name: "",
     password: "",
     confirm_password: "",
+    banking_profile: {
+      profile_name: "",
+      account_holder_name: "",
+      bank_name: "",
+      account_number: "",
+      account_type: "",
+      branch_code: "",
+      default_payment_reference: "",
+    },
   });
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -111,7 +122,14 @@ export function RegisterForm() {
     setError("");
 
     try {
-      const user = await registerUser(formState);
+      const user = await registerUser({
+        email: formState.email,
+        first_name: formState.first_name,
+        last_name: formState.last_name,
+        password: formState.password,
+        confirm_password: formState.confirm_password,
+        banking_profile: includeBankingProfile ? formState.banking_profile : undefined,
+      });
       setAuthenticatedUser(user);
       router.replace("/");
     } catch (submissionError) {
@@ -177,6 +195,125 @@ export function RegisterForm() {
             required
           />
         </label>
+        <div className="auth-optional-section">
+          <label className="toggle-field">
+            <span className="field-label">Optional banking profile</span>
+            <input
+              checked={includeBankingProfile}
+              onChange={(event) => setIncludeBankingProfile(event.target.checked)}
+              type="checkbox"
+            />
+          </label>
+          <p className="subtle-copy">
+            Add a reusable EFT account now if you want new invoices to be able to use saved banking details immediately.
+          </p>
+          {includeBankingProfile ? (
+            <div className="auth-grid">
+              <label className="field-group">
+                <span>Profile name</span>
+                <input
+                  className="input"
+                  value={formState.banking_profile.profile_name}
+                  onChange={(event) =>
+                    setFormState((state) => ({
+                      ...state,
+                      banking_profile: { ...state.banking_profile, profile_name: event.target.value },
+                    }))
+                  }
+                  required={includeBankingProfile}
+                />
+              </label>
+              <label className="field-group">
+                <span>Account holder</span>
+                <input
+                  className="input"
+                  value={formState.banking_profile.account_holder_name}
+                  onChange={(event) =>
+                    setFormState((state) => ({
+                      ...state,
+                      banking_profile: { ...state.banking_profile, account_holder_name: event.target.value },
+                    }))
+                  }
+                  required={includeBankingProfile}
+                />
+              </label>
+              <label className="field-group">
+                <span>Bank name</span>
+                <select
+                  className="input"
+                  value={formState.banking_profile.bank_name}
+                  onChange={(event) =>
+                    setFormState((state) => ({
+                      ...state,
+                      banking_profile: { ...state.banking_profile, bank_name: event.target.value },
+                    }))
+                  }
+                  required={includeBankingProfile}
+                >
+                  <option value="">Select a bank</option>
+                  {getBankNameOptions(formState.banking_profile.bank_name).map((bankName) => (
+                    <option key={bankName} value={bankName}>
+                      {bankName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field-group">
+                <span>Account number</span>
+                <input
+                  className="input"
+                  value={formState.banking_profile.account_number}
+                  onChange={(event) =>
+                    setFormState((state) => ({
+                      ...state,
+                      banking_profile: { ...state.banking_profile, account_number: event.target.value },
+                    }))
+                  }
+                  required={includeBankingProfile}
+                />
+              </label>
+              <label className="field-group">
+                <span>Account type</span>
+                <input
+                  className="input"
+                  value={formState.banking_profile.account_type}
+                  onChange={(event) =>
+                    setFormState((state) => ({
+                      ...state,
+                      banking_profile: { ...state.banking_profile, account_type: event.target.value },
+                    }))
+                  }
+                />
+              </label>
+              <label className="field-group">
+                <span>Branch code</span>
+                <input
+                  className="input"
+                  value={formState.banking_profile.branch_code}
+                  onChange={(event) =>
+                    setFormState((state) => ({
+                      ...state,
+                      banking_profile: { ...state.banking_profile, branch_code: event.target.value },
+                    }))
+                  }
+                />
+              </label>
+              <label className="field-group auth-grid-span">
+                <span>Default payment reference</span>
+                <input
+                  className="input"
+                  value={formState.banking_profile.default_payment_reference}
+                  onChange={(event) =>
+                    setFormState((state) => ({
+                      ...state,
+                      banking_profile: { ...state.banking_profile, default_payment_reference: event.target.value },
+                    }))
+                  }
+                />
+              </label>
+            </div>
+          ) : null}
+        </div>
         <button className="button" disabled={isSubmitting} type="submit">
           {isSubmitting ? "Creating account..." : "Register"}
         </button>

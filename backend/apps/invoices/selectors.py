@@ -7,7 +7,7 @@ from django.utils import timezone
 from .models import Invoice, InvoiceStatus
 
 
-def get_dashboard_summary() -> dict:
+def get_dashboard_summary(owner=None) -> dict:
     today = timezone.localdate()
     paid_amount = Coalesce(Sum("payments__amount"), Decimal("0.00"))
     outstanding_amount = ExpressionWrapper(
@@ -15,6 +15,8 @@ def get_dashboard_summary() -> dict:
         output_field=DecimalField(max_digits=12, decimal_places=2),
     )
     invoices = Invoice.objects.annotate(outstanding_amount=outstanding_amount)
+    if owner is not None:
+        invoices = invoices.filter(owner=owner)
     aggregates = invoices.aggregate(
         total_invoices=Count("id", distinct=True),
         unpaid_invoices=Count(

@@ -103,6 +103,12 @@ export function PublicPaymentPage({ token }: { token: string }) {
         </div>
 
         <div className="public-payment-detail-list">
+          {payment.eft_details.profile_name ? (
+            <div className="public-payment-detail-row">
+              <span className="public-payment-detail-label">Profile</span>
+              <span className="public-payment-detail-text">{payment.eft_details.profile_name}</span>
+            </div>
+          ) : null}
           <div className="public-payment-detail-row">
             <span className="public-payment-detail-label">Bank</span>
             <span className="public-payment-detail-text">{payment.eft_details.bank_name}</span>

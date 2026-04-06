@@ -46,13 +46,21 @@ export function DashboardScreen() {
 
   return (
     <div className="dashboard-stack">
-      <section className="hero-panel dashboard-hero">
+      <section className="hero-panel dashboard-hero dashboard-hero-compact">
         <div>
           <p className="eyebrow">Overview</p>
-          <h2 className="section-title">Your invoice desk</h2>
+          <h2 className="section-title">Your billing desk</h2>
           <p className="subtle-copy">
-            Review open balances, catch overdue accounts, and jump straight into the invoices that need attention.
+            Review open balances, catch overdue accounts, and move straight into the invoices that need attention.
           </p>
+        </div>
+        <div className="dashboard-hero-actions">
+          <Link className="button button-ghost button-nav" href="/recurring-invoices">
+            Review schedules
+          </Link>
+          <Link className="button button-primary-nav button-nav" href="/invoices/new">
+            Create invoice
+          </Link>
         </div>
       </section>
 

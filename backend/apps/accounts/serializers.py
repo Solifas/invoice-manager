@@ -6,7 +6,7 @@ from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
 from rest_framework import serializers
 
-from .models import UserBankingProfile
+from .models import BusinessProfile, UserBankingProfile
 
 
 User = get_user_model()
@@ -16,6 +16,32 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ("id", "email", "first_name", "last_name")
+
+
+class BusinessProfileSerializer(serializers.ModelSerializer):
+    completeness_percentage = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = BusinessProfile
+        fields = (
+            "id",
+            "business_name",
+            "business_type",
+            "registration_number",
+            "vat_number",
+            "trading_name",
+            "contact_email",
+            "contact_phone_number",
+            "business_address",
+            "verification_status",
+            "completeness_percentage",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "completeness_percentage", "created_at", "updated_at")
+
+    def create(self, validated_data):
+        return BusinessProfile.objects.create(user=self.context["request"].user, **validated_data)
 
 
 class BankingProfileSerializer(serializers.ModelSerializer):

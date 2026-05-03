@@ -10,7 +10,8 @@ from apps.clients.models import Client
 from apps.contractors.models import Contractor
 from apps.reminders.services import ReminderChannel
 
-from .models import CurrencyCode, Invoice, InvoiceEftSourceType, InvoiceLineItem, InvoicePayment, RecurringInvoice
+from .currencies import is_supported_currency
+from .models import Invoice, InvoiceEftSourceType, InvoiceLineItem, InvoicePayment, RecurringInvoice
 from .services import (
     attach_manual_eft_details_to_invoice,
     attach_saved_banking_profile_to_invoice,
@@ -39,6 +40,7 @@ class ContractorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Contractor
         fields = ("id", "name", "email", "contact_number", "address")
+        read_only_fields = ("id",)
 
 
 class InvoiceLineItemSerializer(serializers.ModelSerializer):
@@ -153,8 +155,8 @@ class InvoiceSerializer(serializers.ModelSerializer):
 
     def validate_currency(self, value):
         normalized = value.upper()
-        if normalized not in CurrencyCode.values:
-            raise serializers.ValidationError("Currency must be either ZAR or USD.")
+        if not is_supported_currency(normalized):
+            raise serializers.ValidationError("Unsupported currency code.")
         return normalized
 
     def validate(self, attrs):
@@ -265,6 +267,34 @@ class InvoiceEftSnapshotSerializer(serializers.Serializer):
     has_snapshot = serializers.BooleanField()
 
 
+class PaymentLinkActivitySerializer(serializers.ModelSerializer):
+    public_payment_url = serializers.SerializerMethodField()
+    payment_link_available = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Invoice
+        fields = (
+            "payment_page_enabled",
+            "public_token",
+            "public_payment_url",
+            "payment_link_available",
+            "public_token_regenerated_at",
+            "payment_page_first_opened_at",
+            "payment_page_last_opened_at",
+            "payment_page_open_count",
+            "reminder_last_sent_at",
+        )
+        read_only_fields = fields
+
+    def get_public_payment_url(self, obj: Invoice) -> str:
+        if not can_invoice_expose_payment_page(obj):
+            return ""
+        return f"{settings.FRONTEND_URL}/pay/{obj.public_token}"
+
+    def get_payment_link_available(self, obj: Invoice) -> bool:
+        return can_invoice_expose_payment_page(obj)
+
+
 class InvoiceEftDetailsUpdateSerializer(serializers.Serializer):
     mode = serializers.ChoiceField(choices=InvoiceEftSourceType.choices)
     banking_profile_id = serializers.PrimaryKeyRelatedField(
@@ -363,11 +393,60 @@ class ReminderRequestSerializer(serializers.Serializer):
     channel = serializers.ChoiceField(choices=ReminderChannel.choices, default=ReminderChannel.EMAIL)
 
 
+class CollectionsInvoiceSummarySerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    invoice_number = serializers.CharField()
+    client_name = serializers.CharField()
+    due_date = serializers.DateField()
+    outstanding_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    status = serializers.CharField()
+
+
 class DashboardSummarySerializer(serializers.Serializer):
     total_invoices = serializers.IntegerField()
     unpaid_invoices = serializers.IntegerField()
     overdue_invoices = serializers.IntegerField()
     total_amount_outstanding = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_overdue_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    due_next_7_days_invoices = serializers.IntegerField()
+    paid_invoices_this_month = serializers.IntegerField()
+    collected_amount_this_month = serializers.DecimalField(max_digits=12, decimal_places=2)
+    oldest_overdue_invoice = CollectionsInvoiceSummarySerializer(allow_null=True)
+    overdue_invoice_table = CollectionsInvoiceSummarySerializer(many=True)
+
+
+class AgeingBucketSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class OverdueAgeingBucketsSerializer(serializers.Serializer):
+    one_to_seven_days = AgeingBucketSerializer()
+    eight_to_fourteen_days = AgeingBucketSerializer()
+    fifteen_to_thirty_days = AgeingBucketSerializer()
+    thirty_one_plus_days = AgeingBucketSerializer()
+
+
+class HighRiskInvoiceSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    invoice_number = serializers.CharField()
+    client_name = serializers.CharField()
+    due_date = serializers.DateField()
+    days_overdue = serializers.IntegerField()
+    outstanding_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    reminder_sent_count = serializers.IntegerField()
+    status = serializers.CharField()
+
+
+class CollectionsAnalyticsSerializer(serializers.Serializer):
+    total_invoiced_this_month = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_collected_this_month = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_outstanding = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_overdue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    average_days_to_payment = serializers.FloatField()
+    collection_rate_percentage = serializers.DecimalField(max_digits=5, decimal_places=2)
+    overdue_ageing_buckets = OverdueAgeingBucketsSerializer()
+    high_risk_invoices = HighRiskInvoiceSerializer(many=True)
 
 
 class RecurringInvoiceLineItemTemplateSerializer(serializers.Serializer):
@@ -434,8 +513,8 @@ class RecurringInvoiceSerializer(serializers.ModelSerializer):
 
     def validate_currency(self, value):
         normalized = value.upper()
-        if normalized not in CurrencyCode.values:
-            raise serializers.ValidationError("Currency must be either ZAR or USD.")
+        if not is_supported_currency(normalized):
+            raise serializers.ValidationError("Unsupported currency code.")
         return normalized
 
     def validate(self, attrs):

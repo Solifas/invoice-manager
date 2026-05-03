@@ -1,7 +1,7 @@
 import { DashboardSummary } from "@/lib/types";
 
 const cards = [
-  { key: "total_invoices", label: "Total invoices", note: "Across all statuses", filterKey: "all" },
+  { key: "total_invoices", label: "Total invoices", note: "Active and draft invoices", filterKey: "all" },
   { key: "unpaid_invoices", label: "Unpaid invoices", note: "Draft, sent, and overdue", filterKey: "unpaid" },
   { key: "overdue_invoices", label: "Overdue invoices", note: "Needs immediate follow-up", filterKey: "overdue" },
   { key: "total_amount_outstanding", label: "Outstanding amount", note: "Open balance still to collect", filterKey: "unpaid" },

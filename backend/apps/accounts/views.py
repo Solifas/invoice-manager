@@ -12,9 +12,10 @@ from rest_framework import decorators, permissions, status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import UserBankingProfile
+from .models import BusinessProfile, UserBankingProfile
 from .serializers import (
     BankingProfileSerializer,
+    BusinessProfileSerializer,
     ForgotPasswordSerializer,
     LoginSerializer,
     RegisterSerializer,
@@ -108,6 +109,33 @@ class ResetPasswordView(APIView):
 class MeView(APIView):
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class BusinessProfileView(APIView):
+    def get(self, request):
+        try:
+            profile = request.user.business_profile
+        except BusinessProfile.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        return Response(BusinessProfileSerializer(profile).data)
+
+    def post(self, request):
+        if BusinessProfile.objects.filter(user=request.user).exists():
+            return Response({"detail": "Business profile already exists."}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = BusinessProfileSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        profile = serializer.save()
+        return Response(BusinessProfileSerializer(profile).data, status=status.HTTP_201_CREATED)
+
+    def patch(self, request):
+        try:
+            profile = request.user.business_profile
+        except BusinessProfile.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        serializer = BusinessProfileSerializer(profile, data=request.data, partial=True, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 class BankingProfileViewSet(viewsets.ModelViewSet):

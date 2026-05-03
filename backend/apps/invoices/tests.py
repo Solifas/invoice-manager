@@ -10,6 +10,7 @@ from django.core import mail
 from django.test import TestCase
 from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -26,8 +27,10 @@ from apps.invoices.models import (
     RecurringInvoiceStatus,
     TaxType,
 )
+from apps.invoices.currencies import CURRENCY_CATALOG
 from apps.invoices.services import process_due_recurring_invoices, recalculate_invoice_totals
 from apps.invoices.services import add_months
+from apps.reminders.tasks import generate_recurring_invoices
 
 
 User = get_user_model()
@@ -242,13 +245,13 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("line_items", response.data)
 
-    def test_invoice_create_rejects_unsupported_currency(self):
+    def test_invoice_create_accepts_currency_from_catalog(self):
         payload = {
             "invoice_number": "INV-1010",
             "issue_date": str(date.today()),
             "due_date": str(date.today() + timedelta(days=7)),
             "status": InvoiceStatus.DRAFT,
-            "notes": "Unsupported currency should fail.",
+            "notes": "Catalog currency should pass.",
             "currency": "EUR",
             "tax_type": TaxType.NONE,
             "tax_rate": "0.00",
@@ -256,6 +259,33 @@ class InvoicePhaseTwoTests(APITestCase):
             "client": {
                 "name": "Nova Studio",
                 "email": "accounts-eur@nova.test",
+                "address": "20 Market Road",
+                "phone_number": "+27123456789",
+            },
+            "line_items": [
+                {"description": "Consulting", "quantity": "1", "unit_price": "120.00"},
+            ],
+        }
+
+        response = self.client.post(reverse("invoice-list"), payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["currency"], "EUR")
+
+    def test_invoice_create_rejects_unknown_currency(self):
+        payload = {
+            "invoice_number": "INV-1010B",
+            "issue_date": str(date.today()),
+            "due_date": str(date.today() + timedelta(days=7)),
+            "status": InvoiceStatus.DRAFT,
+            "notes": "Unknown currency should fail.",
+            "currency": "INVALID",
+            "tax_type": TaxType.NONE,
+            "tax_rate": "0.00",
+            "payment_page_enabled": False,
+            "client": {
+                "name": "Nova Studio",
+                "email": "accounts-invalid@nova.test",
                 "address": "20 Market Road",
                 "phone_number": "+27123456789",
             },
@@ -283,6 +313,157 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(response.data["total_invoices"], 1)
         self.assertEqual(response.data["unpaid_invoices"], 1)
         self.assertEqual(response.data["total_amount_outstanding"], "237.50")
+
+    def test_collections_summary_covers_overdue_upcoming_paid_cancelled_and_draft_invoices(self):
+        today = timezone.localdate()
+        overdue_old = self.create_invoice(
+            invoice_number="INV-COL-001",
+            issue_date=today - timedelta(days=40),
+            due_date=today - timedelta(days=30),
+            status=InvoiceStatus.SENT,
+        )
+        overdue_new = self.create_invoice(
+            invoice_number="INV-COL-002",
+            issue_date=today - timedelta(days=20),
+            due_date=today - timedelta(days=5),
+            status=InvoiceStatus.SENT,
+        )
+        upcoming = self.create_invoice(
+            invoice_number="INV-COL-003",
+            issue_date=today - timedelta(days=2),
+            due_date=today + timedelta(days=4),
+            status=InvoiceStatus.SENT,
+        )
+        paid = self.create_invoice(
+            invoice_number="INV-COL-004",
+            issue_date=today - timedelta(days=5),
+            due_date=today + timedelta(days=5),
+            status=InvoiceStatus.SENT,
+        )
+        cancelled = self.create_invoice(
+            invoice_number="INV-COL-005",
+            issue_date=today - timedelta(days=40),
+            due_date=today - timedelta(days=20),
+            status=InvoiceStatus.CANCELLED,
+        )
+        draft = self.create_invoice(
+            invoice_number="INV-COL-006",
+            issue_date=today - timedelta(days=10),
+            due_date=today - timedelta(days=3),
+            status=InvoiceStatus.DRAFT,
+        )
+
+        self.client.post(
+            reverse("invoice-payments", args=[overdue_old.id]),
+            {"amount": "87.50", "payment_date": str(today)},
+            format="json",
+        )
+        self.client.post(
+            reverse("invoice-payments", args=[paid.id]),
+            {"amount": "287.50", "payment_date": str(today)},
+            format="json",
+        )
+        self.client.post(
+            reverse("invoice-payments", args=[cancelled.id]),
+            {"amount": "50.00", "payment_date": str(today)},
+            format="json",
+        )
+
+        response = self.client.get(reverse("invoice-dashboard-summary"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_amount_outstanding"], "1062.50")
+        self.assertEqual(response.data["total_overdue_amount"], "487.50")
+        self.assertEqual(response.data["overdue_invoices"], 2)
+        self.assertEqual(response.data["due_next_7_days_invoices"], 1)
+        self.assertEqual(response.data["paid_invoices_this_month"], 2)
+        self.assertEqual(response.data["collected_amount_this_month"], "375.00")
+        self.assertEqual(response.data["oldest_overdue_invoice"]["invoice_number"], overdue_old.invoice_number)
+        self.assertEqual(
+            [invoice["invoice_number"] for invoice in response.data["overdue_invoice_table"]],
+            [overdue_old.invoice_number, overdue_new.invoice_number],
+        )
+        self.assertNotIn(draft.invoice_number, [invoice["invoice_number"] for invoice in response.data["overdue_invoice_table"]])
+        self.assertNotIn(cancelled.invoice_number, [invoice["invoice_number"] for invoice in response.data["overdue_invoice_table"]])
+
+    def test_collections_analytics_calculates_recovery_metrics_ageing_and_risk(self):
+        today = timezone.localdate()
+        month_start = today.replace(day=1)
+        month_unpaid = self.create_invoice(
+            invoice_number="INV-AN-001",
+            issue_date=month_start,
+            due_date=today + timedelta(days=7),
+            status=InvoiceStatus.SENT,
+        )
+        paid = self.create_invoice(
+            invoice_number="INV-AN-002",
+            issue_date=month_start,
+            due_date=today,
+            status=InvoiceStatus.SENT,
+        )
+        overdue_1_to_7 = self.create_invoice(
+            invoice_number="INV-AN-003",
+            issue_date=today - timedelta(days=14),
+            due_date=today - timedelta(days=3),
+            status=InvoiceStatus.SENT,
+        )
+        overdue_8_to_14 = self.create_invoice(
+            invoice_number="INV-AN-004",
+            issue_date=today - timedelta(days=24),
+            due_date=today - timedelta(days=10),
+            status=InvoiceStatus.SENT,
+        )
+        overdue_15_to_30 = self.create_invoice(
+            invoice_number="INV-AN-005",
+            issue_date=today - timedelta(days=35),
+            due_date=today - timedelta(days=20),
+            status=InvoiceStatus.SENT,
+        )
+        overdue_15_to_30.reminder_sent_count = 2
+        overdue_15_to_30.save(update_fields=["reminder_sent_count", "updated_at"])
+        overdue_31_plus = self.create_invoice(
+            invoice_number="INV-AN-006",
+            issue_date=today - timedelta(days=55),
+            due_date=today - timedelta(days=40),
+            status=InvoiceStatus.SENT,
+        )
+        cancelled = self.create_invoice(
+            invoice_number="INV-AN-007",
+            issue_date=month_start,
+            due_date=today,
+            status=InvoiceStatus.CANCELLED,
+        )
+
+        self.client.post(
+            reverse("invoice-payments", args=[paid.id]),
+            {"amount": "287.50", "payment_date": str(today)},
+            format="json",
+        )
+        self.client.post(
+            reverse("invoice-payments", args=[overdue_15_to_30.id]),
+            {"amount": "87.50", "payment_date": str(today)},
+            format="json",
+        )
+
+        response = self.client.get(reverse("invoice-collections-analytics"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_invoiced_this_month"], "575.00")
+        self.assertEqual(response.data["total_collected_this_month"], "375.00")
+        self.assertEqual(response.data["total_outstanding"], "1350.00")
+        self.assertEqual(response.data["total_overdue"], "1062.50")
+        self.assertEqual(response.data["collection_rate_percentage"], "65.22")
+        self.assertEqual(response.data["average_days_to_payment"], float((today - month_start).days))
+        self.assertEqual(response.data["overdue_ageing_buckets"]["one_to_seven_days"], {"count": 1, "amount": "287.50"})
+        self.assertEqual(response.data["overdue_ageing_buckets"]["eight_to_fourteen_days"], {"count": 1, "amount": "287.50"})
+        self.assertEqual(response.data["overdue_ageing_buckets"]["fifteen_to_thirty_days"], {"count": 1, "amount": "200.00"})
+        self.assertEqual(response.data["overdue_ageing_buckets"]["thirty_one_plus_days"], {"count": 1, "amount": "287.50"})
+        high_risk_numbers = {invoice["invoice_number"] for invoice in response.data["high_risk_invoices"]}
+        self.assertIn(overdue_15_to_30.invoice_number, high_risk_numbers)
+        self.assertIn(overdue_31_plus.invoice_number, high_risk_numbers)
+        self.assertNotIn(overdue_8_to_14.invoice_number, high_risk_numbers)
+        self.assertNotIn(cancelled.invoice_number, high_risk_numbers)
+        self.assertNotIn(month_unpaid.invoice_number, high_risk_numbers)
 
     def test_invoice_list_supports_unpaid_status_group_filter(self):
         unpaid_invoice = self.create_invoice(invoice_number="INV-2003D", status=InvoiceStatus.SENT)
@@ -359,6 +540,28 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(response.data["eft_details"]["profile_name"], "Primary Business Account")
         self.assertEqual(response.data["eft_details"]["bank_name"], "Example Bank")
 
+    def test_public_payment_page_open_updates_link_activity(self):
+        invoice = self.create_invoice(invoice_number="INV-3001A")
+        self.assertEqual(invoice.payment_page_open_count, 0)
+        self.assertIsNone(invoice.payment_page_first_opened_at)
+        self.assertIsNone(invoice.payment_page_last_opened_at)
+
+        first_response = self.client.get(reverse("public-invoice-payment", args=[invoice.public_token]))
+        invoice.refresh_from_db()
+        first_opened_at = invoice.payment_page_first_opened_at
+        first_last_opened_at = invoice.payment_page_last_opened_at
+
+        second_response = self.client.get(reverse("public-invoice-payment", args=[invoice.public_token]))
+        invoice.refresh_from_db()
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(invoice.payment_page_open_count, 2)
+        self.assertIsNotNone(first_opened_at)
+        self.assertIsNotNone(first_last_opened_at)
+        self.assertEqual(invoice.payment_page_first_opened_at, first_opened_at)
+        self.assertGreaterEqual(invoice.payment_page_last_opened_at, first_last_opened_at)
+
     def test_public_payment_page_returns_not_found_for_invalid_or_disabled_tokens(self):
         invoice = self.create_invoice(invoice_number="INV-3002", payment_page_enabled=False)
 
@@ -367,6 +570,71 @@ class InvoicePhaseTwoTests(APITestCase):
 
         self.assertEqual(invalid_response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(disabled_response.status_code, status.HTTP_404_NOT_FOUND)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.payment_page_open_count, 0)
+
+    def test_invoice_owner_can_view_payment_link_activity(self):
+        invoice = self.create_invoice(invoice_number="INV-3002A")
+        self.client.get(reverse("public-invoice-payment", args=[invoice.public_token]))
+
+        response = self.client.get(reverse("invoice-payment-link-activity", args=[invoice.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["payment_page_enabled"])
+        self.assertEqual(response.data["public_token"], invoice.public_token)
+        self.assertTrue(response.data["public_payment_url"].endswith(invoice.public_token))
+        self.assertEqual(response.data["payment_page_open_count"], 1)
+        self.assertIsNotNone(response.data["payment_page_first_opened_at"])
+        self.assertIsNotNone(response.data["payment_page_last_opened_at"])
+        self.assertIn("reminder_last_sent_at", response.data)
+
+    def test_other_user_cannot_view_payment_link_activity(self):
+        invoice = self.create_invoice(invoice_number="INV-3002AA")
+        other_client = Client.objects.create(
+            owner=self.other_user,
+            name="Other Co",
+            email="other-payment-activity@example.test",
+            address="2 Side Street",
+        )
+        other_invoice = Invoice.objects.create(
+            owner=self.other_user,
+            client=other_client,
+            invoice_number="INV-OTHER-ACTIVITY",
+            issue_date=date.today(),
+            due_date=date.today() + timedelta(days=7),
+            status=InvoiceStatus.SENT,
+            currency=CurrencyCode.ZAR,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+            payment_page_enabled=True,
+        )
+
+        own_response = self.client.get(reverse("invoice-payment-link-activity", args=[invoice.id]))
+        other_response = self.client.get(reverse("invoice-payment-link-activity", args=[other_invoice.id]))
+
+        self.assertEqual(own_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(other_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_regenerating_payment_token_records_date_resets_current_link_activity_and_invalidates_old_token(self):
+        invoice = self.create_invoice(invoice_number="INV-3002AB")
+        old_token = invoice.public_token
+        self.client.get(reverse("public-invoice-payment", args=[old_token]))
+
+        response = self.client.post(reverse("invoice-regenerate-payment-page-token", args=[invoice.id]), {}, format="json")
+        invoice.refresh_from_db()
+
+        old_token_response = self.client.get(reverse("public-invoice-payment", args=[old_token]))
+        new_token_response = self.client.get(reverse("public-invoice-payment", args=[invoice.public_token]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(invoice.public_token, old_token)
+        self.assertIsNotNone(invoice.public_token_regenerated_at)
+        self.assertEqual(response.data["public_token"], invoice.public_token)
+        self.assertEqual(invoice.payment_page_open_count, 0)
+        self.assertIsNone(invoice.payment_page_first_opened_at)
+        self.assertIsNone(invoice.payment_page_last_opened_at)
+        self.assertEqual(old_token_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(new_token_response.status_code, status.HTTP_200_OK)
 
     def test_paid_invoice_does_not_expose_public_payment_url(self):
         invoice = self.create_invoice(invoice_number="INV-3002B")
@@ -479,6 +747,10 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(generated_invoice.subtotal, Decimal("600.00"))
         self.assertEqual(generated_invoice.tax_amount, Decimal("60.00"))
         self.assertEqual(generated_invoice.total_amount, Decimal("660.00"))
+        self.assertEqual(generated_invoice.status, InvoiceStatus.SENT)
+        self.assertTrue(generated_invoice.payment_page_enabled)
+        self.assertEqual(generated_invoice.eft_source_profile, self.banking_profile)
+        self.assertEqual(generated_invoice.eft_bank_name, self.banking_profile.bank_name)
 
         recurring_invoice.refresh_from_db()
         self.assertEqual(recurring_invoice.next_run_date, add_months(date.today(), 1))
@@ -507,6 +779,34 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(len(first_run), 1)
         self.assertEqual(len(second_run), 0)
         self.assertEqual(Invoice.objects.filter(recurring_invoice=recurring_invoice).count(), 1)
+
+    def test_recurring_invoice_task_emails_generated_invoice(self):
+        today = timezone.localdate()
+        recurring_invoice = RecurringInvoice.objects.create(
+            owner=self.user,
+            client=self.client_record,
+            template_name="Monthly Email Retainer",
+            frequency=RecurringInvoiceFrequency.MONTHLY,
+            start_date=today,
+            next_run_date=today,
+            status=RecurringInvoiceStatus.ACTIVE,
+            currency=CurrencyCode.USD,
+            payment_terms_days=7,
+            tax_type=TaxType.NONE,
+            tax_rate=Decimal("0.00"),
+            line_items_template=[
+                {"description": "Support", "quantity": "1", "unit_price": "250.00"},
+            ],
+        )
+
+        generate_recurring_invoices()
+
+        generated_invoice = Invoice.objects.get(recurring_invoice=recurring_invoice)
+        self.assertEqual(generated_invoice.status, InvoiceStatus.SENT)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.client_record.email])
+        self.assertIn(generated_invoice.invoice_number, mail.outbox[0].subject)
+        self.assertIn(f"/pay/{generated_invoice.public_token}", mail.outbox[0].body)
 
     def test_recurring_invoice_api_create_and_soft_delete(self):
         payload = {
@@ -561,7 +861,7 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("line_items_template", response.data)
 
-    def test_recurring_invoice_api_rejects_unsupported_currency(self):
+    def test_recurring_invoice_api_accepts_currency_from_catalog(self):
         payload = {
             "template_name": "Quarterly Audit",
             "client_id": self.client_record.id,
@@ -569,6 +869,28 @@ class InvoicePhaseTwoTests(APITestCase):
             "start_date": str(date.today()),
             "status": "active",
             "currency": "EUR",
+            "payment_terms_days": 14,
+            "tax_type": "none",
+            "tax_rate": "0.00",
+            "notes": "Quarterly recurring work.",
+            "line_items_template": [
+                {"description": "Audit", "quantity": "1", "unit_price": "900.00"},
+            ],
+        }
+
+        response = self.client.post(reverse("recurring-invoice-list"), payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["currency"], "EUR")
+
+    def test_recurring_invoice_api_rejects_unknown_currency(self):
+        payload = {
+            "template_name": "Quarterly Audit",
+            "client_id": self.client_record.id,
+            "frequency": "quarterly",
+            "start_date": str(date.today()),
+            "status": "active",
+            "currency": "INVALID",
             "payment_terms_days": 14,
             "tax_type": "none",
             "tax_rate": "0.00",
@@ -637,6 +959,50 @@ class InvoicePhaseTwoTests(APITestCase):
         self.assertEqual(contractor_response.status_code, status.HTTP_200_OK)
         self.assertEqual(client_response.data[0]["name"], self.client_record.name)
         self.assertEqual(contractor_response.data[0]["name"], self.contractor.name)
+
+    def test_contractor_endpoint_creates_and_updates_owner_scoped_contractors(self):
+        create_response = self.client.post(
+            reverse("contractor-list"),
+            {
+                "name": "Solifas Salimu",
+                "email": "solifas@extratrx.com",
+                "contact_number": "0812344514",
+                "address": "Johannesburg",
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        contractor = Contractor.objects.get(id=create_response.data["id"])
+        self.assertEqual(contractor.owner, self.user)
+        self.assertEqual(contractor.email, "solifas@extratrx.com")
+
+        update_response = self.client.patch(
+            reverse("contractor-detail", args=[contractor.id]),
+            {"contact_number": "0812344515"},
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        contractor.refresh_from_db()
+        self.assertEqual(contractor.contact_number, "0812344515")
+
+        other_contractor = Contractor.objects.create(owner=self.other_user, name="Hidden Contractor")
+        blocked_response = self.client.patch(
+            reverse("contractor-detail", args=[other_contractor.id]),
+            {"name": "Should not update"},
+            format="json",
+        )
+
+        self.assertEqual(blocked_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_currency_list_endpoint_returns_catalog(self):
+        response = self.client.get(reverse("currency-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreater(len(response.data), 100)
+        self.assertEqual(response.data[0], {"code": "AED", "name": CURRENCY_CATALOG["AED"]})
+        self.assertIn({"code": "ZAR", "name": CURRENCY_CATALOG["ZAR"]}, response.data)
 
     def test_user_only_sees_their_own_invoices_and_dashboard_data(self):
         other_client = Client.objects.create(

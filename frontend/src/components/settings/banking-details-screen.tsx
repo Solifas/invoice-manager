@@ -194,7 +194,7 @@ export function BankingDetailsScreen() {
         <div className="section-heading">
           <div>
             <p className="eyebrow">{editingId ? "Edit profile" : "New profile"}</p>
-            <h3 className="section-title">{editingId ? "Update reusable banking details" : "Add reusable banking details"}</h3>
+            <h3 className="section-title">{editingId ? "Update banking details" : "Add banking details"}</h3>
           </div>
           {editingId ? (
             <button

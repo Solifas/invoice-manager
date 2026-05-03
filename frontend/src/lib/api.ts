@@ -1,13 +1,19 @@
 import {
   BankingProfile,
   BankingProfileInput,
+  BusinessProfile,
+  BusinessProfileInput,
   Client,
+  CollectionsAnalytics,
   Contractor,
+  ContractorInput,
+  CurrencyOption,
   DashboardSummary,
   Invoice,
   InvoiceEftSnapshot,
   InvoiceListResponse,
   InvoicePayment,
+  PaymentLinkActivity,
   PublicInvoicePaymentPage,
   RecurringInvoice,
   RecurringInvoiceListResponse,
@@ -211,12 +217,34 @@ export async function fetchDashboardSummary() {
   return request<DashboardSummary>("/invoices/dashboard-summary/");
 }
 
+export async function fetchCollectionsAnalytics() {
+  return request<CollectionsAnalytics>("/invoices/collections-analytics/");
+}
+
 export async function fetchClients() {
   return request<Client[]>("/clients/");
 }
 
 export async function fetchContractors() {
   return request<Contractor[]>("/contractors/");
+}
+
+export async function createContractor(payload: ContractorInput) {
+  return request<Contractor>("/contractors/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateContractor(id: number, payload: ContractorInput) {
+  return request<Contractor>(`/contractors/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchCurrencies() {
+  return request<CurrencyOption[]>("/currencies/");
 }
 
 export async function fetchBankingProfiles() {
@@ -247,6 +275,24 @@ export async function setDefaultBankingProfile(id: string) {
   return request<BankingProfile>(`/banking-profiles/${id}/set-default/`, {
     method: "POST",
     body: JSON.stringify({}),
+  });
+}
+
+export async function fetchBusinessProfile() {
+  return request<BusinessProfile>("/business-profile/");
+}
+
+export async function createBusinessProfile(payload: BusinessProfileInput) {
+  return request<BusinessProfile>("/business-profile/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateBusinessProfile(payload: Partial<BusinessProfileInput>) {
+  return request<BusinessProfile>("/business-profile/", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
   });
 }
 
@@ -311,6 +357,10 @@ export async function regeneratePaymentPageToken(id: string) {
   return request<Invoice>(`/invoices/${id}/payment-page/regenerate-token/`, {
     method: "POST",
   });
+}
+
+export async function fetchPaymentLinkActivity(id: string) {
+  return request<PaymentLinkActivity>(`/invoices/${id}/payment-link-activity/`);
 }
 
 export async function fetchRecurringInvoices() {

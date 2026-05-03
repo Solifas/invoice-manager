@@ -9,11 +9,13 @@ from apps.clients.models import Client
 from apps.contractors.models import Contractor
 from apps.reminders.services import ReminderDeliveryError, dispatch_manual_invoice_reminder
 
+from .currencies import list_supported_currencies
 from .models import Invoice, InvoiceLineItem, InvoicePayment, InvoiceStatus, RecurringInvoice
 from .pdf import build_invoice_pdf
-from .selectors import get_dashboard_summary
+from .selectors import get_collections_analytics, get_dashboard_summary
 from .serializers import (
     ClientSerializer,
+    CollectionsAnalyticsSerializer,
     ContractorSerializer,
     DashboardSummarySerializer,
     InvoiceEftDetailsUpdateSerializer,
@@ -22,6 +24,7 @@ from .serializers import (
     InvoiceListSerializer,
     InvoicePaymentSerializer,
     InvoiceSerializer,
+    PaymentLinkActivitySerializer,
     PublicInvoicePaymentSerializer,
     RecurringInvoiceSerializer,
     ReminderRequestSerializer,
@@ -30,6 +33,7 @@ from .services import (
     get_invoice_eft_snapshot,
     has_invoice_eft_snapshot,
     recalculate_invoice_totals,
+    record_public_payment_page_open,
     regenerate_invoice_public_token,
     sync_invoice_status,
     sync_invoices_status,
@@ -74,6 +78,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     @decorators.action(detail=False, methods=["get"], url_path="dashboard-summary")
     def dashboard_summary(self, request):
         serializer = DashboardSummarySerializer(get_dashboard_summary(owner=request.user))
+        return Response(serializer.data)
+
+    @decorators.action(detail=False, methods=["get"], url_path="collections-analytics")
+    def collections_analytics(self, request):
+        serializer = CollectionsAnalyticsSerializer(get_collections_analytics(owner=request.user))
         return Response(serializer.data)
 
     @decorators.action(detail=True, methods=["post"], url_path="send-reminder")
@@ -122,6 +131,12 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(invoice)
         return Response(serializer.data)
 
+    @decorators.action(detail=True, methods=["get"], url_path="payment-link-activity")
+    def payment_link_activity(self, request, pk=None):
+        invoice = self.get_object()
+        serializer = PaymentLinkActivitySerializer(invoice)
+        return Response(serializer.data)
+
     @decorators.action(detail=True, methods=["get", "put"], url_path="eft-details")
     def eft_details(self, request, pk=None):
         invoice = self.get_object()
@@ -159,8 +174,14 @@ class PublicInvoicePaymentView(APIView):
         sync_invoice_status(invoice)
         if not has_invoice_eft_snapshot(invoice):
             raise Http404
+        record_public_payment_page_open(invoice)
         serializer = PublicInvoicePaymentSerializer(invoice)
         return Response(serializer.data)
+
+
+class CurrencyListView(APIView):
+    def get(self, request):
+        return Response(list_supported_currencies())
 
 
 class InvoiceLineItemViewSet(
@@ -185,13 +206,17 @@ class ClientLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         return super().get_queryset().filter(owner=self.request.user)
 
 
-class ContractorLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+class ContractorLookupViewSet(viewsets.ModelViewSet):
     queryset = Contractor.objects.all()
     serializer_class = ContractorSerializer
     pagination_class = None
+    http_method_names = ["get", "post", "put", "patch", "head", "options"]
 
     def get_queryset(self):
         return super().get_queryset().filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
 
 
 class InvoicePaymentViewSet(

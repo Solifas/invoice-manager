@@ -65,9 +65,19 @@ export function AppShell({ children }: { children: ReactNode }) {
       isActive: pathname.startsWith("/recurring-invoices"),
     },
     {
+      href: "/collections" as Route,
+      label: "Collections",
+      isActive: pathname.startsWith("/collections"),
+    },
+    {
       href: "/settings/banking-details" as Route,
       label: "Banking",
-      isActive: pathname.startsWith("/settings/"),
+      isActive: pathname.startsWith("/settings/banking-details"),
+    },
+    {
+      href: "/settings/business-profile" as Route,
+      label: "Business",
+      isActive: pathname.startsWith("/settings/business-profile"),
     },
     {
       href: "/invoices/new" as Route,
@@ -87,9 +97,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               <div className="brand-mark">IM</div>
               <div>
                 <p className="eyebrow">Invoice Manager</p>
-                <h1>Billing that stays clear.</h1>
+                <h1>Billing workspace</h1>
                 <p className="subtle-copy topbar-copy">
-                  Track invoices, reminders, and recurring billing from one compact workspace.
+                  Invoices, reminders, payments, and recurring schedules in one focused workspace.
                 </p>
               </div>
             </div>

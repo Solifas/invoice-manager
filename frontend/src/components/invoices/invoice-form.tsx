@@ -8,24 +8,22 @@ import { useEffect, useState } from "react";
 import {
   createInvoice,
   fetchBankingProfiles,
+  fetchCurrencies,
   fetchInvoice,
   getErrorMessage,
   updateInvoice,
   updateInvoiceEftDetails,
 } from "@/lib/api";
+import { SearchableCurrencySelect } from "@/components/shared/searchable-currency-select";
 import { getBankNameOptions } from "@/lib/banking";
-import { BankingProfile, CurrencyCode, Invoice, InvoiceEftMode, InvoiceLineItem, InvoiceStatus, TaxType } from "@/lib/types";
+import { getStoredCurrencyPreference, storeCurrencyPreference } from "@/lib/currency-preferences";
+import { BankingProfile, Invoice, InvoiceEftMode, InvoiceLineItem, InvoiceStatus, TaxType } from "@/lib/types";
 
 const emptyItem = (): InvoiceLineItem => ({
   description: "",
   quantity: "1",
   unit_price: "0.00",
 });
-
-const currencyOptions: Array<{ value: CurrencyCode; label: string }> = [
-  { value: "ZAR", label: "ZAR · South African rand" },
-  { value: "USD", label: "USD · US dollar" },
-];
 
 type InvoiceEftFormState = {
   mode: InvoiceEftMode;
@@ -167,6 +165,10 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
     queryKey: ["banking-profiles"],
     queryFn: fetchBankingProfiles,
   });
+  const currenciesQuery = useQuery({
+    queryKey: ["currencies"],
+    queryFn: fetchCurrencies,
+  });
 
   useEffect(() => {
     if (invoiceQuery.data) {
@@ -191,6 +193,30 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
       };
     });
   }, [invoiceId]);
+
+  useEffect(() => {
+    if (invoiceId || !currenciesQuery.data?.length) {
+      return;
+    }
+
+    const preferredCurrency = getStoredCurrencyPreference();
+    if (!preferredCurrency) {
+      return;
+    }
+
+    const supported = currenciesQuery.data.some((option) => option.code === preferredCurrency);
+    if (!supported) {
+      return;
+    }
+
+    setFormState((current) => {
+      if (current.currency === preferredCurrency) {
+        return current;
+      }
+
+      return { ...current, currency: preferredCurrency };
+    });
+  }, [currenciesQuery.data, invoiceId]);
 
   useEffect(() => {
     if (invoiceId || !bankingProfilesQuery.data?.length || eftState.mode || !formState.payment_page_enabled) {
@@ -274,17 +300,15 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
   const updateItem = (index: number, next: Partial<InvoiceLineItem>) => {
     setFormState((current) => ({
       ...current,
-      line_items: current.line_items.map((item, itemIndex) =>
-        itemIndex === index ? { ...item, ...next } : item,
-      ),
+      line_items: current.line_items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...next } : item)),
     }));
   };
 
-  if (invoiceQuery.isLoading || bankingProfilesQuery.isLoading) {
+  if (invoiceQuery.isLoading || bankingProfilesQuery.isLoading || currenciesQuery.isLoading) {
     return <div className="card state-card">Loading invoice...</div>;
   }
 
-  if (invoiceQuery.isError || bankingProfilesQuery.isError) {
+  if (invoiceQuery.isError || bankingProfilesQuery.isError || currenciesQuery.isError) {
     return <div className="card state-card error">Unable to load invoice.</div>;
   }
 
@@ -295,6 +319,10 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
   }, 0);
   const previewTax = formState.tax_type === "percentage" ? previewSubtotal * ((Number(formState.tax_rate) || 0) / 100) : 0;
   const previewTotal = previewSubtotal + previewTax;
+  const handleCurrencyChange = (code: string) => {
+    storeCurrencyPreference(code);
+    setFormState((current) => ({ ...current, currency: code }));
+  };
 
   return (
     <form
@@ -398,28 +426,17 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
             <p className="eyebrow">Pricing</p>
             <h3 className="section-title">Set the billing currency and tax rules</h3>
             <p className="subtle-copy section-copy">
-              Keep invoices in either rand or dollars and decide whether tax should be added before the final total is calculated.
+              Choose from the backend currency catalog and decide whether tax should be added before the final total is calculated.
             </p>
           </div>
         </div>
         <div className="field-grid">
-          <label>
-            <span className="field-label">Currency</span>
-            <select
-              className="input"
-              value={formState.currency}
-              onChange={(event) =>
-                setFormState((current) => ({ ...current, currency: event.target.value as CurrencyCode }))
-              }
-              required
-            >
-              {currencyOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <SearchableCurrencySelect
+            label="Currency"
+            onChange={handleCurrencyChange}
+            options={currenciesQuery.data || []}
+            value={formState.currency}
+          />
           <label>
             <span className="field-label">Tax type</span>
             <select
@@ -504,9 +521,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
                       className="input"
                       value={eftState.banking_profile_id}
                       onChange={(event) => {
-                        const profile = bankingProfilesQuery.data?.find(
-                          (item) => String(item.id) === event.target.value,
-                        );
+                        const profile = bankingProfilesQuery.data?.find((item) => String(item.id) === event.target.value);
                         if (profile) {
                           updateEftFromProfile(profile);
                         } else {
@@ -565,9 +580,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
                     <input
                       className="input"
                       value={eftState.account_holder_name}
-                      onChange={(event) =>
-                        setEftState((current) => ({ ...current, account_holder_name: event.target.value }))
-                      }
+                      onChange={(event) => setEftState((current) => ({ ...current, account_holder_name: event.target.value }))}
                     />
                   </label>
                   <label>
@@ -590,9 +603,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
                     <input
                       className="input"
                       value={eftState.account_number}
-                      onChange={(event) =>
-                        setEftState((current) => ({ ...current, account_number: event.target.value }))
-                      }
+                      onChange={(event) => setEftState((current) => ({ ...current, account_number: event.target.value }))}
                     />
                   </label>
                   <label>
@@ -651,9 +662,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
             <input
               className="input"
               value={formState.client.name}
-              onChange={(event) =>
-                setFormState((current) => ({ ...current, client: { ...current.client, name: event.target.value } }))
-              }
+              onChange={(event) => setFormState((current) => ({ ...current, client: { ...current.client, name: event.target.value } }))}
               required
             />
           </label>
@@ -663,9 +672,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
               className="input"
               type="email"
               value={formState.client.email}
-              onChange={(event) =>
-                setFormState((current) => ({ ...current, client: { ...current.client, email: event.target.value } }))
-              }
+              onChange={(event) => setFormState((current) => ({ ...current, client: { ...current.client, email: event.target.value } }))}
               required
             />
           </label>
@@ -674,12 +681,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
             <input
               className="input"
               value={formState.client.phone_number}
-              onChange={(event) =>
-                setFormState((current) => ({
-                  ...current,
-                  client: { ...current.client, phone_number: event.target.value },
-                }))
-              }
+              onChange={(event) => setFormState((current) => ({ ...current, client: { ...current.client, phone_number: event.target.value } }))}
               placeholder="+27123456789"
             />
           </label>
@@ -688,9 +690,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
             <textarea
               className="input textarea"
               value={formState.client.address}
-              onChange={(event) =>
-                setFormState((current) => ({ ...current, client: { ...current.client, address: event.target.value } }))
-              }
+              onChange={(event) => setFormState((current) => ({ ...current, client: { ...current.client, address: event.target.value } }))}
               rows={4}
             />
           </label>
@@ -709,9 +709,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
           <button
             className="button button-ghost"
             type="button"
-            onClick={() =>
-                setFormState((current) => ({ ...current, line_items: [...current.line_items, emptyItem()] }))
-            }
+            onClick={() => setFormState((current) => ({ ...current, line_items: [...current.line_items, emptyItem()] }))}
           >
             Add item
           </button>
@@ -730,7 +728,7 @@ export function InvoiceForm({ invoiceId }: { invoiceId?: string }) {
             const lineTotal = quantity * unitPrice;
 
             return (
-              <div className="line-item-row" key={`${index}-${item.description}`}>
+              <div className="line-item-row" key={item.id ?? `draft-line-item-${index}`}>
                 <label className="line-item-field line-item-description">
                   <span className="field-label line-item-mobile-label">Description</span>
                   <input

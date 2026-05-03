@@ -35,6 +35,14 @@ class EmailReminderProvider:
         )
 
 
+def get_client_invoice_url(invoice: Invoice) -> str:
+    from apps.invoices.services import can_invoice_expose_payment_page
+
+    if can_invoice_expose_payment_page(invoice):
+        return f"{settings.FRONTEND_URL}/pay/{invoice.public_token}"
+    return f"{settings.FRONTEND_URL}/invoices/{invoice.id}"
+
+
 class ConsoleWhatsAppProvider:
     def send(self, phone_number: str, body: str) -> None:
         logger.info("WhatsApp reminder to %s: %s", phone_number, body)
@@ -78,6 +86,7 @@ def render_invoice_reminder(invoice: Invoice, template_name: str) -> str:
         "invoice": invoice,
         "client": invoice.client,
         "frontend_url": settings.FRONTEND_URL,
+        "invoice_url": get_client_invoice_url(invoice),
     }
     return render_to_string(template_name, context)
 
@@ -113,6 +122,15 @@ def deliver_manual_invoice_reminder(invoice_id: int, channel: str = ReminderChan
     )
 
 
+def send_recurring_invoice_created_email(invoice: Invoice) -> None:
+    body = render_invoice_reminder(invoice, "emails/recurring_invoice_created.txt")
+    EmailReminderProvider().send(
+        invoice=invoice,
+        subject=f"Invoice {invoice.invoice_number} is ready",
+        body=body,
+    )
+
+
 def dispatch_manual_invoice_reminder(invoice: Invoice, channel: str = ReminderChannel.EMAIL) -> str:
     validate_manual_invoice_reminder(invoice, channel)
     from .tasks import enqueue_manual_invoice_reminder
@@ -143,7 +161,8 @@ def send_invoice_reminder(invoice: Invoice, template_name: str, subject: str, ch
         raise ReminderDeliveryError(f"Unsupported reminder channel '{channel}'.")
 
     invoice.reminder_last_sent_at = timezone.now()
-    invoice.save(update_fields=["reminder_last_sent_at"])
+    invoice.reminder_sent_count += 1
+    invoice.save(update_fields=["reminder_last_sent_at", "reminder_sent_count"])
 
 
 def get_upcoming_due_invoices():

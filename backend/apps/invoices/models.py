@@ -68,7 +68,7 @@ class Invoice(models.Model):
     due_date = models.DateField()
     status = models.CharField(max_length=20, choices=InvoiceStatus.choices, default=InvoiceStatus.DRAFT)
     notes = models.TextField(blank=True)
-    currency = models.CharField(max_length=8, choices=CurrencyCode.choices, default=CurrencyCode.ZAR)
+    currency = models.CharField(max_length=8, default=CurrencyCode.ZAR)
     tax_type = models.CharField(max_length=20, choices=TaxType.choices, default=TaxType.NONE)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
@@ -76,6 +76,10 @@ class Invoice(models.Model):
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     payment_page_enabled = models.BooleanField(default=False)
     public_token = models.CharField(max_length=64, unique=True, default=generate_invoice_public_token)
+    public_token_regenerated_at = models.DateTimeField(blank=True, null=True)
+    payment_page_first_opened_at = models.DateTimeField(blank=True, null=True)
+    payment_page_last_opened_at = models.DateTimeField(blank=True, null=True)
+    payment_page_open_count = models.PositiveIntegerField(default=0)
     eft_source_type = models.CharField(max_length=20, choices=InvoiceEftSourceType.choices, blank=True)
     eft_source_profile = models.ForeignKey(
         "accounts.UserBankingProfile",
@@ -92,6 +96,7 @@ class Invoice(models.Model):
     eft_branch_code = models.CharField(max_length=32, blank=True)
     payment_reference = models.CharField(max_length=100, blank=True)
     reminder_last_sent_at = models.DateTimeField(blank=True, null=True)
+    reminder_sent_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -233,7 +238,7 @@ class RecurringInvoice(models.Model):
     end_date = models.DateField(blank=True, null=True)
     next_run_date = models.DateField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=RecurringInvoiceStatus.choices, default=RecurringInvoiceStatus.ACTIVE)
-    currency = models.CharField(max_length=8, choices=CurrencyCode.choices, default=CurrencyCode.ZAR)
+    currency = models.CharField(max_length=8, default=CurrencyCode.ZAR)
     payment_terms_days = models.PositiveIntegerField(default=14)
     tax_type = models.CharField(max_length=20, choices=TaxType.choices, default=TaxType.NONE)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))

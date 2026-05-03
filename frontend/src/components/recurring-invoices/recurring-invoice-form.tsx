@@ -1,20 +1,25 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import {
+  createContractor,
   createRecurringInvoice,
   fetchClients,
   fetchContractors,
+  fetchCurrencies,
   fetchRecurringInvoice,
   getErrorMessage,
+  updateContractor,
   updateRecurringInvoice,
 } from "@/lib/api";
+import { SearchableCurrencySelect } from "@/components/shared/searchable-currency-select";
+import { getStoredCurrencyPreference, storeCurrencyPreference } from "@/lib/currency-preferences";
 import {
-  CurrencyCode,
+  ContractorInput,
   RecurringInvoice,
   RecurringInvoiceLineItemTemplate,
   RecurringInvoiceStatus,
@@ -27,10 +32,12 @@ const emptyItem = (): RecurringInvoiceLineItemTemplate => ({
   unit_price: "0.00",
 });
 
-const currencyOptions: Array<{ value: CurrencyCode; label: string }> = [
-  { value: "ZAR", label: "ZAR · South African rand" },
-  { value: "USD", label: "USD · US dollar" },
-];
+const emptyContractor = (): ContractorInput => ({
+  name: "",
+  email: "",
+  contact_number: "",
+  address: "",
+});
 
 function getClientContactLabel(client: { name: string; email: string; phone_number: string }) {
   if (client.phone_number) {
@@ -116,9 +123,13 @@ function toPayload(recurringInvoice: RecurringInvoice) {
 
 export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceId?: string }) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [formState, setFormState] = useState<RecurringInvoice>(defaultState);
   const [clientContactInput, setClientContactInput] = useState("");
   const [clientInputError, setClientInputError] = useState("");
+  const [contractorDialogMode, setContractorDialogMode] = useState<"create" | "edit" | null>(null);
+  const [contractorForm, setContractorForm] = useState<ContractorInput>(emptyContractor);
+
   const clientsQuery = useQuery({
     queryKey: ["clients"],
     queryFn: fetchClients,
@@ -131,6 +142,10 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
     queryKey: ["recurring-invoice", recurringInvoiceId],
     queryFn: () => fetchRecurringInvoice(recurringInvoiceId!),
     enabled: Boolean(recurringInvoiceId),
+  });
+  const currenciesQuery = useQuery({
+    queryKey: ["currencies"],
+    queryFn: fetchCurrencies,
   });
 
   useEffect(() => {
@@ -164,6 +179,30 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
   }, [recurringInvoiceId]);
 
   useEffect(() => {
+    if (recurringInvoiceId || !currenciesQuery.data?.length) {
+      return;
+    }
+
+    const preferredCurrency = getStoredCurrencyPreference();
+    if (!preferredCurrency) {
+      return;
+    }
+
+    const supported = currenciesQuery.data.some((option) => option.code === preferredCurrency);
+    if (!supported) {
+      return;
+    }
+
+    setFormState((current) => {
+      if (current.currency === preferredCurrency) {
+        return current;
+      }
+
+      return { ...current, currency: preferredCurrency };
+    });
+  }, [currenciesQuery.data, recurringInvoiceId]);
+
+  useEffect(() => {
     if (recurringInvoiceId || !clientsQuery.data?.length || formState.client_id) {
       return;
     }
@@ -193,6 +232,30 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
     onSuccess: () => router.push("/recurring-invoices"),
   });
 
+  const contractorMutation = useMutation({
+    mutationFn: () => {
+      const payload = {
+        ...contractorForm,
+        name: contractorForm.name.trim(),
+        email: contractorForm.email.trim(),
+        contact_number: contractorForm.contact_number.trim(),
+        address: contractorForm.address.trim(),
+      };
+
+      if (contractorDialogMode === "edit" && formState.contractor_id) {
+        return updateContractor(formState.contractor_id, payload);
+      }
+
+      return createContractor(payload);
+    },
+    onSuccess: async (contractor) => {
+      await queryClient.invalidateQueries({ queryKey: ["contractors"] });
+      setFormState((current) => ({ ...current, contractor_id: contractor.id }));
+      setContractorDialogMode(null);
+      setContractorForm(emptyContractor());
+    },
+  });
+
   const updateItem = (index: number, next: Partial<RecurringInvoiceLineItemTemplate>) => {
     setFormState((current) => ({
       ...current,
@@ -210,28 +273,52 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
     const unitPrice = Number(item.unit_price) || 0;
     return total + quantity * unitPrice;
   }, 0);
+  const handleCurrencyChange = (code: string) => {
+    storeCurrencyPreference(code);
+    setFormState((current) => ({ ...current, currency: code }));
+  };
 
-  if (recurringQuery.isLoading || clientsQuery.isLoading || contractorsQuery.isLoading) {
+  const openCreateContractorDialog = () => {
+    setContractorForm(emptyContractor());
+    setContractorDialogMode("create");
+  };
+
+  const openEditContractorDialog = () => {
+    if (!selectedContractor) {
+      return;
+    }
+
+    setContractorForm({
+      name: selectedContractor.name,
+      email: selectedContractor.email,
+      contact_number: selectedContractor.contact_number,
+      address: selectedContractor.address,
+    });
+    setContractorDialogMode("edit");
+  };
+
+  if (recurringQuery.isLoading || clientsQuery.isLoading || contractorsQuery.isLoading || currenciesQuery.isLoading) {
     return <div className="card state-card">Loading recurring invoice...</div>;
   }
 
-  if (recurringQuery.isError || clientsQuery.isError || contractorsQuery.isError) {
+  if (recurringQuery.isError || clientsQuery.isError || contractorsQuery.isError || currenciesQuery.isError) {
     return <div className="card state-card error">Unable to load recurring invoice.</div>;
   }
 
   return (
-    <form
-      className="form-grid"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (!formState.client_id) {
-          setClientInputError("Enter a saved client email or phone number.");
-          return;
-        }
-        setClientInputError("");
-        mutation.mutate();
-      }}
-    >
+    <>
+      <form
+        className="form-grid"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!formState.client_id) {
+            setClientInputError("Enter a saved client email or phone number.");
+            return;
+          }
+          setClientInputError("");
+          mutation.mutate();
+        }}
+      >
       <section className="form-intro">
         <div>
           <p className="eyebrow">{recurringInvoiceId ? "Edit recurring invoice" : "Create recurring invoice"}</p>
@@ -296,7 +383,10 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
                 const nextValue = event.target.value;
                 setClientContactInput(nextValue);
                 const matchedClient = clientsQuery.data?.find(
-                  (client) => getClientContactLabel(client) === nextValue || client.email === nextValue || client.phone_number === nextValue,
+                  (client) =>
+                    getClientContactLabel(client) === nextValue ||
+                    client.email === nextValue ||
+                    client.phone_number === nextValue,
                 );
                 setFormState((current) => ({
                   ...current,
@@ -315,26 +405,42 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
             </datalist>
             {clientInputError ? <span className="form-error">{clientInputError}</span> : null}
           </label>
-          <label>
-            <span className="field-label">Contractor</span>
-            <select
-              className="input"
-              onChange={(event) =>
-                setFormState((current) => ({
-                  ...current,
-                  contractor_id: event.target.value ? Number(event.target.value) : null,
-                }))
-              }
-              value={formState.contractor_id || ""}
-            >
-              <option value="">No contractor assigned</option>
-              {contractorsQuery.data?.map((contractor) => (
-                <option key={contractor.id} value={contractor.id}>
-                  {contractor.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="field-control-stack">
+            <label>
+              <span className="field-label">Contractor</span>
+              <select
+                className="input"
+                onChange={(event) =>
+                  setFormState((current) => ({
+                    ...current,
+                    contractor_id: event.target.value ? Number(event.target.value) : null,
+                  }))
+                }
+                value={formState.contractor_id || ""}
+              >
+                <option value="">No contractor assigned</option>
+                {contractorsQuery.data?.map((contractor) => (
+                  <option key={contractor.id} value={contractor.id}>
+                    {contractor.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="inline-control-row">
+              <button className="button button-ghost compact-link-button" onClick={openCreateContractorDialog} type="button">
+                Add contractor
+              </button>
+              <button
+                className="button button-ghost compact-link-button"
+                disabled={!selectedContractor}
+                onClick={openEditContractorDialog}
+                type="button"
+              >
+                Edit selected
+              </button>
+            </div>
+            <p className="field-help">Assign the contractor responsible for this recurring work, or leave it blank.</p>
+          </div>
         </div>
       </section>
 
@@ -417,30 +523,18 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
           </div>
         </div>
         <div className="field-grid">
-          <label>
-            <span className="field-label">Currency</span>
-            <select
-              className="input"
-              onChange={(event) =>
-                setFormState((current) => ({ ...current, currency: event.target.value as CurrencyCode }))
-              }
-              value={formState.currency}
-            >
-              {currencyOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <SearchableCurrencySelect
+            label="Currency"
+            onChange={handleCurrencyChange}
+            options={currenciesQuery.data || []}
+            value={formState.currency}
+          />
           <label>
             <span className="field-label">Payment terms (days)</span>
             <input
               className="input"
               min="0"
-              onChange={(event) =>
-                setFormState((current) => ({ ...current, payment_terms_days: Number(event.target.value) }))
-              }
+              onChange={(event) => setFormState((current) => ({ ...current, payment_terms_days: Number(event.target.value) }))}
               type="number"
               value={formState.payment_terms_days}
             />
@@ -508,7 +602,7 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
         </div>
         <div className="line-item-list">
           {formState.line_items_template.map((item, index) => (
-            <div className="line-item-row recurring-line-item-row" key={`${index}-${item.description}`}>
+            <div className="line-item-row recurring-line-item-row" key={`recurring-line-item-${index}`}>
               <label className="line-item-field line-item-description">
                 <span className="field-label line-item-mobile-label">Description</span>
                 <input
@@ -571,6 +665,112 @@ export function RecurringInvoiceForm({ recurringInvoiceId }: { recurringInvoiceI
         </button>
         {mutation.isError ? <span className="form-error">{getErrorMessage(mutation.error)}</span> : null}
       </div>
-    </form>
+
+      </form>
+
+      {contractorDialogMode ? (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !contractorMutation.isPending) {
+              setContractorDialogMode(null);
+            }
+          }}
+        >
+          <section
+            aria-labelledby="contractor-dialog-title"
+            aria-modal="true"
+            className="modal-card contractor-modal-card"
+            role="dialog"
+          >
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">Contractor details</p>
+                <h3 className="section-title" id="contractor-dialog-title">
+                  {contractorDialogMode === "edit" ? "Update contractor" : "Add contractor"}
+                </h3>
+                <p className="subtle-copy">Saved contractors become available in recurring invoice templates.</p>
+              </div>
+              <button
+                aria-label="Close contractor dialog"
+                className="button button-ghost compact-link-button"
+                disabled={contractorMutation.isPending}
+                onClick={() => setContractorDialogMode(null)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="field-grid modal-field-grid">
+              <label>
+                <span className="field-label">Name</span>
+                <input
+                  className="input"
+                  onChange={(event) => setContractorForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="e.g. Nora Dev"
+                  required
+                  value={contractorForm.name}
+                />
+              </label>
+              <label>
+                <span className="field-label">Email</span>
+                <input
+                  className="input"
+                  onChange={(event) => setContractorForm((current) => ({ ...current, email: event.target.value }))}
+                  placeholder="name@example.com"
+                  type="email"
+                  value={contractorForm.email}
+                />
+              </label>
+              <label>
+                <span className="field-label">Phone number</span>
+                <input
+                  className="input"
+                  onChange={(event) =>
+                    setContractorForm((current) => ({ ...current, contact_number: event.target.value }))
+                  }
+                  placeholder="+27..."
+                  value={contractorForm.contact_number}
+                />
+              </label>
+              <label className="field-span">
+                <span className="field-label">Address</span>
+                <textarea
+                  className="input textarea"
+                  onChange={(event) => setContractorForm((current) => ({ ...current, address: event.target.value }))}
+                  placeholder="Street address or billing address"
+                  rows={3}
+                  value={contractorForm.address}
+                />
+              </label>
+            </div>
+
+            {contractorMutation.isError ? (
+              <p className="form-error contractor-modal-error">{getErrorMessage(contractorMutation.error)}</p>
+            ) : null}
+
+            <div className="modal-actions">
+              <button
+                className="button button-ghost"
+                disabled={contractorMutation.isPending}
+                onClick={() => setContractorDialogMode(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="button"
+                disabled={contractorMutation.isPending || !contractorForm.name.trim()}
+                onClick={() => contractorMutation.mutate()}
+                type="button"
+              >
+                {contractorMutation.isPending ? "Saving..." : "Save contractor"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }

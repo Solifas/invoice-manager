@@ -8,6 +8,7 @@ from .services import (
     get_overdue_invoices,
     get_upcoming_due_invoices,
     send_invoice_reminder,
+    send_recurring_invoice_created_email,
 )
 
 
@@ -39,4 +40,6 @@ def send_automatic_invoice_reminders() -> None:
 
 @shared_task
 def generate_recurring_invoices() -> None:
-    process_due_recurring_invoices()
+    for invoice in process_due_recurring_invoices():
+        recalculate_invoice_totals(invoice)
+        send_recurring_invoice_created_email(invoice)

@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ClientLookupViewSet,
     ContractorLookupViewSet,
+    CurrencyListView,
     InvoiceLineItemViewSet,
     InvoicePaymentViewSet,
     InvoiceViewSet,
@@ -20,6 +21,7 @@ router.register("contractors", ContractorLookupViewSet, basename="contractor")
 router.register("recurring-invoices", RecurringInvoiceViewSet, basename="recurring-invoice")
 
 urlpatterns = [
+    path("currencies/", CurrencyListView.as_view(), name="currency-list"),
     path("public/pay/<str:token>/", PublicInvoicePaymentView.as_view(), name="public-invoice-payment"),
     path("", include(router.urls)),
 ]

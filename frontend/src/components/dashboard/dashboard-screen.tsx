@@ -49,9 +49,9 @@ export function DashboardScreen() {
       <section className="hero-panel dashboard-hero dashboard-hero-compact">
         <div>
           <p className="eyebrow">Overview</p>
-          <h2 className="section-title">Your billing desk</h2>
+          <h2 className="section-title">Billing overview</h2>
           <p className="subtle-copy">
-            Review open balances, catch overdue accounts, and move straight into the invoices that need attention.
+            Review open balances, overdue accounts, recurring schedules, and recent invoice activity.
           </p>
         </div>
         <div className="dashboard-hero-actions">

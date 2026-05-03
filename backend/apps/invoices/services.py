@@ -4,7 +4,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import F, Sum
 from django.utils import timezone
 
 from apps.accounts.models import UserBankingProfile
@@ -180,7 +180,35 @@ def regenerate_invoice_public_token(invoice: Invoice) -> Invoice:
     if not can_invoice_expose_payment_page(invoice):
         raise ValidationError({"payment_page": "A payment link is only available for unpaid active invoices."})
     invoice.public_token = generate_invoice_public_token()
-    invoice.save(update_fields=["public_token", "updated_at"])
+    invoice.public_token_regenerated_at = timezone.now()
+    invoice.payment_page_first_opened_at = None
+    invoice.payment_page_last_opened_at = None
+    invoice.payment_page_open_count = 0
+    invoice.save(
+        update_fields=[
+            "public_token",
+            "public_token_regenerated_at",
+            "payment_page_first_opened_at",
+            "payment_page_last_opened_at",
+            "payment_page_open_count",
+            "updated_at",
+        ]
+    )
+    return invoice
+
+
+@transaction.atomic
+def record_public_payment_page_open(invoice: Invoice) -> Invoice:
+    opened_at = timezone.now()
+    update_fields = {
+        "payment_page_last_opened_at": opened_at,
+        "payment_page_open_count": F("payment_page_open_count") + 1,
+        "updated_at": opened_at,
+    }
+    if invoice.payment_page_first_opened_at is None:
+        update_fields["payment_page_first_opened_at"] = opened_at
+    Invoice.objects.filter(pk=invoice.pk).update(**update_fields)
+    invoice.refresh_from_db()
     return invoice
 
 
@@ -284,6 +312,17 @@ def build_recurring_invoice_number(recurring_invoice: RecurringInvoice, issue_da
     return candidate
 
 
+def get_default_banking_profile_for_owner(owner) -> UserBankingProfile | None:
+    if not owner:
+        return None
+
+    return (
+        UserBankingProfile.objects.filter(user=owner, is_active=True)
+        .order_by("-is_default", "profile_name", "id")
+        .first()
+    )
+
+
 @transaction.atomic
 def generate_invoice_from_recurring(recurring_invoice: RecurringInvoice, run_date: date | None = None) -> Invoice | None:
     if recurring_invoice.status != RecurringInvoiceStatus.ACTIVE or not recurring_invoice.next_run_date:
@@ -304,6 +343,7 @@ def generate_invoice_from_recurring(recurring_invoice: RecurringInvoice, run_dat
         advance_recurring_schedule(recurring_invoice, scheduled_date)
         return None
 
+    banking_profile = get_default_banking_profile_for_owner(recurring_invoice.owner)
     invoice = Invoice.objects.create(
         owner=recurring_invoice.owner,
         client=recurring_invoice.client,
@@ -311,13 +351,16 @@ def generate_invoice_from_recurring(recurring_invoice: RecurringInvoice, run_dat
         invoice_number=build_recurring_invoice_number(recurring_invoice, scheduled_date),
         issue_date=scheduled_date,
         due_date=scheduled_date + timedelta(days=recurring_invoice.payment_terms_days),
-        status=InvoiceStatus.DRAFT,
+        status=InvoiceStatus.SENT,
         notes=recurring_invoice.notes,
         currency=recurring_invoice.currency,
         tax_type=recurring_invoice.tax_type,
         tax_rate=recurring_invoice.tax_rate,
+        payment_page_enabled=banking_profile is not None,
     )
     replace_invoice_line_items(invoice, recurring_invoice.line_items_template)
+    if banking_profile:
+        attach_saved_banking_profile_to_invoice(invoice, banking_profile)
     advance_recurring_schedule(recurring_invoice, scheduled_date)
     return invoice
 

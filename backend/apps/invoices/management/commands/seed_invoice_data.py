@@ -25,6 +25,7 @@ class Command(BaseCommand):
                 "email": "demo@example.com",
                 "first_name": "Demo",
                 "last_name": "Owner",
+                "phone_number": "",
                 "invoice_prefix": "DEMO",
                 "contractor_email": "nora@example.test",
                 "contractor_name": "Nora Dev",
@@ -35,6 +36,7 @@ class Command(BaseCommand):
                 "email": "solifas@extratrx.com",
                 "first_name": "Solifas",
                 "last_name": "Salimu",
+                "phone_number": "0812344514",
                 "invoice_prefix": "SOL",
                 "contractor_email": "solifas.contractor@example.test",
                 "contractor_name": "Mila Ops",
@@ -42,6 +44,22 @@ class Command(BaseCommand):
                 "contractor_address": "19 Cedar Close",
             },
         ]
+        configured_emails = {owner_config["email"] for owner_config in seeded_owners}
+        for user in User.objects.exclude(email__in=configured_emails):
+            prefix_source = "".join(character for character in user.email.split("@")[0].upper() if character.isalnum())
+            seeded_owners.append(
+                {
+                    "email": user.email,
+                    "first_name": user.first_name or "Seeded",
+                    "last_name": user.last_name or "Owner",
+                    "phone_number": "",
+                    "invoice_prefix": f"{(prefix_source or 'USER')[:5]}{user.id}",
+                    "contractor_email": f"contractor+{user.id}@example.test",
+                    "contractor_name": "Seeded Ops Partner",
+                    "contractor_phone": "+27110000000",
+                    "contractor_address": "1 Seeded Workspace",
+                }
+            )
 
         for owner_config in seeded_owners:
             owner, _ = User.objects.get_or_create(
@@ -84,6 +102,19 @@ class Command(BaseCommand):
                 },
             )
             UserBankingProfile.objects.filter(user=owner).exclude(id=primary_profile.id).update(is_default=False)
+
+            if owner_config["phone_number"]:
+                Client.objects.update_or_create(
+                    owner=owner,
+                    email=owner.email,
+                    defaults={
+                        "owner": owner,
+                        "name": f"{owner.first_name} {owner.last_name}".strip() or owner.email,
+                        "email": owner.email,
+                        "address": "",
+                        "phone_number": owner_config["phone_number"],
+                    },
+                )
 
             sample_rows = [
                 {
@@ -159,6 +190,72 @@ class Command(BaseCommand):
                     "items": [
                         ("Monthly maintenance", Decimal("2"), Decimal("300.00")),
                         ("Reporting", Decimal("1"), Decimal("150.00")),
+                    ],
+                    "payments": [],
+                },
+                {
+                    "client": {
+                        "name": "Harbour Retail",
+                        "email": "payables@harbour.test",
+                        "address": "7 Loop Street",
+                        "phone_number": "+27124440111",
+                    },
+                    "invoice_number": f"INV-{owner_config['invoice_prefix']}-2026-004",
+                    "status": InvoiceStatus.SENT,
+                    "currency": CurrencyCode.ZAR,
+                    "tax_type": TaxType.NONE,
+                    "tax_rate": Decimal("0.00"),
+                    "issue_offset": -55,
+                    "due_offset": -35,
+                    "payment_page_enabled": True,
+                    "eft_mode": "saved_profile",
+                    "payment_reference": "",
+                    "items": [
+                        ("Implementation support", Decimal("1"), Decimal("2250.00")),
+                    ],
+                    "payments": [],
+                },
+                {
+                    "client": {
+                        "name": "Kopano Foods",
+                        "email": "accounts@kopano.test",
+                        "address": "22 Market Street",
+                        "phone_number": "+27127770000",
+                    },
+                    "invoice_number": f"INV-{owner_config['invoice_prefix']}-2026-005",
+                    "status": InvoiceStatus.DRAFT,
+                    "currency": CurrencyCode.ZAR,
+                    "tax_type": TaxType.NONE,
+                    "tax_rate": Decimal("0.00"),
+                    "issue_offset": -12,
+                    "due_offset": -2,
+                    "payment_page_enabled": False,
+                    "eft_mode": "",
+                    "payment_reference": "",
+                    "items": [
+                        ("Draft proposal", Decimal("1"), Decimal("980.00")),
+                    ],
+                    "payments": [],
+                },
+                {
+                    "client": {
+                        "name": "Cancelled Client",
+                        "email": "cancelled@example.test",
+                        "address": "Archived Road",
+                        "phone_number": "+27126660000",
+                    },
+                    "invoice_number": f"INV-{owner_config['invoice_prefix']}-2026-006",
+                    "status": InvoiceStatus.CANCELLED,
+                    "currency": CurrencyCode.ZAR,
+                    "tax_type": TaxType.NONE,
+                    "tax_rate": Decimal("0.00"),
+                    "issue_offset": -45,
+                    "due_offset": -25,
+                    "payment_page_enabled": False,
+                    "eft_mode": "",
+                    "payment_reference": "",
+                    "items": [
+                        ("Cancelled scope", Decimal("1"), Decimal("1300.00")),
                     ],
                     "payments": [],
                 },
@@ -258,4 +355,9 @@ class Command(BaseCommand):
                 },
             )
 
-        self.stdout.write(self.style.SUCCESS("Seed data created or updated for demo@example.com and solifas@extratrx.com."))
+        self.stdout.write(
+            self.style.SUCCESS(
+                "Seed data created or updated for all configured and existing user accounts. "
+                "Each seeded account uses password StrongPass123!."
+            )
+        )

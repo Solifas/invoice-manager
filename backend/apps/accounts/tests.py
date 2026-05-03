@@ -11,7 +11,7 @@ from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from apps.accounts.models import UserBankingProfile
+from apps.accounts.models import BusinessProfile, UserBankingProfile
 from apps.clients.models import Client
 from apps.invoices.models import CurrencyCode, Invoice, InvoiceStatus, TaxType
 from apps.invoices.services import recalculate_invoice_totals
@@ -338,3 +338,114 @@ class AuthenticationApiTests(APITestCase):
 
         detail_response = self.client.get(reverse("banking-profile-detail", args=[other_profile.id]))
         self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_business_profile_create_and_update(self):
+        self.client.force_authenticate(self.user)
+
+        create_response = self.client.post(
+            reverse("business-profile"),
+            {
+                "business_name": "Owner User Consulting",
+                "business_type": "sole_proprietor",
+                "registration_number": "",
+                "vat_number": "",
+                "trading_name": "Owner Consulting",
+                "contact_email": "hello@owner.test",
+                "contact_phone_number": "+27123456789",
+                "business_address": "12 Main Road, Johannesburg",
+                "verification_status": "not_started",
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data["business_name"], "Owner User Consulting")
+        self.assertEqual(create_response.data["verification_status"], "not_started")
+        self.assertEqual(create_response.data["completeness_percentage"], 75)
+
+        update_response = self.client.patch(
+            reverse("business-profile"),
+            {
+                "vat_number": "4123456789",
+                "verification_status": "pending",
+            },
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_response.data["vat_number"], "4123456789")
+        self.assertEqual(update_response.data["verification_status"], "pending")
+        self.assertEqual(update_response.data["completeness_percentage"], 88)
+
+    def test_business_profile_is_user_scoped(self):
+        BusinessProfile.objects.create(
+            user=self.user,
+            business_name="Owner Business",
+            business_type="company",
+            contact_email="owner@example.test",
+            contact_phone_number="+27123456789",
+            business_address="Owner address",
+        )
+        other_user = User.objects.create_user(
+            username="other-business@example.test",
+            email="other-business@example.test",
+            password="StrongPass123!",
+        )
+        self.client.force_authenticate(other_user)
+
+        missing_response = self.client.get(reverse("business-profile"))
+        create_response = self.client.post(
+            reverse("business-profile"),
+            {
+                "business_name": "Other Business",
+                "business_type": "company",
+                "contact_email": "other@example.test",
+                "contact_phone_number": "+27111111111",
+                "business_address": "Other address",
+            },
+            format="json",
+        )
+
+        self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data["business_name"], "Other Business")
+
+    def test_business_profile_completeness_calculation(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.post(
+            reverse("business-profile"),
+            {
+                "business_name": "Completeness Pty Ltd",
+                "business_type": "company",
+                "registration_number": "2024/123456/07",
+                "vat_number": "4123456789",
+                "trading_name": "Completeness",
+                "contact_email": "complete@example.test",
+                "contact_phone_number": "+27123456789",
+                "business_address": "100 Complete Street",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["completeness_percentage"], 100)
+
+    def test_business_profile_rejects_invalid_verification_status(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.post(
+            reverse("business-profile"),
+            {
+                "business_name": "Invalid Status Pty Ltd",
+                "business_type": "company",
+                "contact_email": "invalid@example.test",
+                "contact_phone_number": "+27123456789",
+                "business_address": "1 Invalid Road",
+                "verification_status": "approved",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("verification_status", response.data)

@@ -34,6 +34,7 @@ export function InvoiceTable({
             <th>Issue date</th>
             <th>Due date</th>
             <th>Status</th>
+            <th>Currency</th>
             <th>Total</th>
           </tr>
         </thead>
@@ -52,9 +53,10 @@ export function InvoiceTable({
               <td>
                 <StatusBadge status={invoice.status} />
               </td>
+              <td>{invoice.currency}</td>
               <td>
                 <span className="table-total">
-                  {invoice.currency} {invoice.total_amount}
+                  {invoice.total_amount}
                 </span>
               </td>
             </tr>

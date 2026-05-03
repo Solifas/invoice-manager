@@ -1,0 +1,9 @@
+Hello {{ client.name }},
+
+Your recurring invoice {{ invoice.invoice_number }} has been issued.
+
+Due date: {{ invoice.due_date }}
+Amount due: {{ invoice.currency }} {{ invoice.total_amount }}
+Invoice link: {{ invoice_url }}
+
+Thank you.

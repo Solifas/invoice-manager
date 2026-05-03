@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import {
   deleteInvoice,
   fetchInvoice,
+  fetchPaymentLinkActivity,
   getErrorMessage,
   getInvoicePdfUrl,
   recordInvoicePayment,
@@ -26,6 +27,22 @@ const buildDefaultPaymentState = (): Omit<InvoicePayment, "id" | "created_at" | 
   notes: "",
 });
 
+const manualStatusOptions: InvoiceStatus[] = ["draft", "sent", "cancelled"];
+
+function getEditableStatus(status: InvoiceStatus): InvoiceStatus {
+  return manualStatusOptions.includes(status) ? status : "sent";
+}
+
+function formatDateTime(value: string | null | undefined) {
+  if (!value) {
+    return "Not yet";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
 export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -35,6 +52,12 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
   const invoiceQuery = useQuery({
     queryKey: ["invoice", invoiceId],
     queryFn: () => fetchInvoice(invoiceId),
+  });
+  const paymentLinkActivityQuery = useQuery({
+    queryKey: ["invoice", invoiceId, "payment-link-activity"],
+    queryFn: () => fetchPaymentLinkActivity(invoiceId),
+    enabled: Boolean(invoiceId),
+    refetchOnWindowFocus: true,
   });
 
   const statusMutation = useMutation({
@@ -47,6 +70,9 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
 
   const reminderMutation = useMutation({
     mutationFn: (channel: ReminderChannel) => sendReminder(invoiceId, channel),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["invoice", invoiceId, "payment-link-activity"] });
+    },
   });
 
   const paymentMutation = useMutation({
@@ -61,6 +87,7 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
     mutationFn: () => regeneratePaymentPageToken(invoiceId),
     onSuccess: (updatedInvoice) => {
       queryClient.setQueryData(["invoice", invoiceId], updatedInvoice);
+      queryClient.invalidateQueries({ queryKey: ["invoice", invoiceId, "payment-link-activity"] });
     },
   });
 
@@ -71,7 +98,7 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
 
   useEffect(() => {
     if (invoiceQuery.data?.status) {
-      setSelectedStatus(invoiceQuery.data.status);
+      setSelectedStatus(getEditableStatus(invoiceQuery.data.status));
     }
   }, [invoiceQuery.data?.status]);
 
@@ -93,15 +120,26 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
   }
 
   const invoice = invoiceQuery.data;
-  const paymentLinkAvailable = invoice.payment_link_available && Boolean(invoice.public_payment_url);
+  const paymentLinkActivity = paymentLinkActivityQuery.data;
+  const publicPaymentUrl = paymentLinkActivity?.public_payment_url || invoice.public_payment_url || "";
+  const paymentLinkAvailable = Boolean(
+    (paymentLinkActivity?.payment_link_available ?? invoice.payment_link_available) && publicPaymentUrl
+  );
+  const currentStatusIsDerived = invoice.status === "paid" || invoice.status === "overdue";
 
   const copyPaymentLink = async () => {
     if (!paymentLinkAvailable) {
       return;
     }
-    await navigator.clipboard.writeText(invoice.public_payment_url || "");
+    await navigator.clipboard.writeText(publicPaymentUrl);
     setCopyState("copied");
     window.setTimeout(() => setCopyState("idle"), 2000);
+  };
+
+  const refreshPaymentLinkActivitySoon = () => {
+    window.setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ["invoice", invoiceId, "payment-link-activity"] });
+    }, 1200);
   };
 
   return (
@@ -149,7 +187,7 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
             onChange={(event) => setSelectedStatus(event.target.value as InvoiceStatus)}
             value={selectedStatus}
           >
-            {["draft", "sent", "paid", "overdue", "cancelled"].map((status) => (
+            {manualStatusOptions.map((status) => (
               <option key={status} value={status}>
                 {status}
               </option>
@@ -170,6 +208,11 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
           ) : (
             <p className="subtle-copy">Status is saved. Paid and overdue states can still update automatically from payments and due dates.</p>
           )}
+          {currentStatusIsDerived ? (
+            <p className="subtle-copy">
+              This invoice is currently <strong>{invoice.status}</strong> because that state is derived automatically from payments and due dates.
+            </p>
+          ) : null}
           {statusMutation.isError ? <p className="form-error">{getErrorMessage(statusMutation.error)}</p> : null}
         </div>
       </section>
@@ -232,7 +275,16 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
                   ? "Payment link is unavailable because this invoice is cancelled."
                   : "Public EFT page is disabled."}
           </p>
+          {paymentLinkActivityQuery.isError ? (
+            <p className="form-error">Unable to load payment link activity.</p>
+          ) : null}
           <div className="detail-copy-list">
+            <p>Link enabled: {paymentLinkActivity?.payment_page_enabled ?? invoice.payment_page_enabled ? "Yes" : "No"}</p>
+            <p>Open count: {paymentLinkActivity?.payment_page_open_count ?? 0}</p>
+            <p>First opened: {formatDateTime(paymentLinkActivity?.payment_page_first_opened_at)}</p>
+            <p>Last opened: {formatDateTime(paymentLinkActivity?.payment_page_last_opened_at)}</p>
+            <p>Token regenerated: {formatDateTime(paymentLinkActivity?.public_token_regenerated_at)}</p>
+            <p>Last reminder sent: {formatDateTime(paymentLinkActivity?.reminder_last_sent_at)}</p>
             <p>Source: {invoice.eft_snapshot.mode ? invoice.eft_snapshot.mode.replace("_", " ") : "No EFT details attached"}</p>
             <p>Profile: {invoice.eft_snapshot.profile_name || "Not set"}</p>
             <p>Account holder: {invoice.eft_snapshot.account_holder_name || "Not set"}</p>
@@ -246,12 +298,21 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
             <a
               aria-disabled={!paymentLinkAvailable}
               className={`button button-secondary action-chip ${!paymentLinkAvailable ? "button-disabled" : ""}`}
-              href={paymentLinkAvailable ? invoice.public_payment_url : undefined}
+              href={paymentLinkAvailable ? publicPaymentUrl : undefined}
+              onClick={refreshPaymentLinkActivitySoon}
               rel="noreferrer"
               target="_blank"
             >
               Open page
             </a>
+            <button
+              className="button button-secondary action-chip"
+              disabled={paymentLinkActivityQuery.isFetching}
+              onClick={() => paymentLinkActivityQuery.refetch()}
+              type="button"
+            >
+              {paymentLinkActivityQuery.isFetching ? "Refreshing..." : "Refresh activity"}
+            </button>
             <button
               className="button button-ghost action-chip"
               disabled={!paymentLinkAvailable}
@@ -262,7 +323,10 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
             </button>
           </div>
           <p className={`subtle-copy payment-link-copy ${paymentLinkAvailable ? "is-active" : ""}`}>
-            {invoice.public_payment_url || "No payment link available for this invoice."}
+            {publicPaymentUrl || "No payment link available for this invoice."}
+          </p>
+          <p className="subtle-copy">
+            Regenerating the token invalidates the old payment link. Share the new link with the client after refreshing it.
           </p>
           {regenerateTokenMutation.isError ? <p className="form-error">{getErrorMessage(regenerateTokenMutation.error)}</p> : null}
         </div>

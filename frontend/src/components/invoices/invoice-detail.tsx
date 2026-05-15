@@ -48,6 +48,7 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
   const queryClient = useQueryClient();
   const [paymentForm, setPaymentForm] = useState(buildDefaultPaymentState);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [toast, setToast] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const [selectedStatus, setSelectedStatus] = useState<InvoiceStatus>("draft");
   const invoiceQuery = useQuery({
     queryKey: ["invoice", invoiceId],
@@ -70,8 +71,17 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
 
   const reminderMutation = useMutation({
     mutationFn: (channel: ReminderChannel) => sendReminder(invoiceId, channel),
-    onSuccess: () => {
+    onSuccess: (result, channel) => {
+      setToast({
+        tone: "success",
+        message: result.detail || `${channel === "whatsapp" ? "WhatsApp" : "Email"} reminder sent.`,
+      });
+      window.setTimeout(() => setToast(null), 3200);
       queryClient.invalidateQueries({ queryKey: ["invoice", invoiceId, "payment-link-activity"] });
+    },
+    onError: (error) => {
+      setToast({ tone: "error", message: getErrorMessage(error) });
+      window.setTimeout(() => setToast(null), 4200);
     },
   });
 
@@ -144,6 +154,12 @@ export function InvoiceDetail({ invoiceId }: { invoiceId: string }) {
 
   return (
     <div className="detail-stack">
+      {toast ? (
+        <div className={`toast-notification toast-${toast.tone}`} role="status" aria-live="polite">
+          {toast.message}
+        </div>
+      ) : null}
+
       <section className="card detail-hero">
         <div className="detail-hero-copy">
           <p className="eyebrow">Invoice</p>

@@ -2151,6 +2151,33 @@ label,
   font-weight: 700;
 }
 
+.toast-notification {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 100;
+  max-width: min(420px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: #ffffff;
+  color: var(--text);
+  padding: 14px 16px;
+  font-weight: 800;
+  box-shadow: var(--shadow);
+}
+
+.toast-success {
+  border-color: #c7e4da;
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.toast-error {
+  border-color: #efc7c7;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .collections-insights-grid {
   margin-bottom: 14px;
 }
